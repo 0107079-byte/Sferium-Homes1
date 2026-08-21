@@ -1,0 +1,530 @@
+import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
+import { Play, Maximize } from 'lucide-react';
+import { VideoProvider } from '../types';
+import { extractVideoId } from '../utils/extractVideoId';
+import { seekSafe, syncEngine, PlayerAdapter } from '../modules/sync';
+import { syncSocket } from '../ws/socket';
+
+export interface UniversalPlayerRef extends PlayerAdapter {
+  getCurrentTime: () => number;
+  seekTo: (seconds: number, allowSeekAhead?: boolean) => void;
+  play: () => void;
+  pause: () => void;
+  isReady: () => boolean;
+  getDuration: () => number;
+  provider?: string;
+}
+
+interface UniversalPlayerProps {
+  roomId?: string;
+  userId?: string;
+  videoUrl: string;
+  provider: VideoProvider;
+  videoId?: string;
+  playing: boolean;
+  currentTime: number;
+  isHost: boolean;
+  anyoneCanControl?: boolean;
+  ws?: WebSocket | null;
+  onPlay?: () => void;
+  onPause?: () => void;
+  onSeek?: (time: number) => void;
+  onTimeUpdate?: (time: number) => void;
+  onDurationChange?: (duration: number) => void;
+  onStreamRequest?: (streamUrl: string) => void;
+}
+
+export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerProps>(({
+  roomId,
+  videoUrl,
+  provider,
+  videoId: propVideoId,
+  playing,
+  currentTime,
+  isHost,
+  ws,
+  onPlay,
+  onPause,
+  onSeek,
+  onTimeUpdate,
+  onDurationChange,
+}, ref) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const [isPlayerReady, setIsPlayerReady] = useState(false);
+  const [internalTime, setInternalTime] = useState<number>(currentTime);
+  const durationRef = useRef<number>(1800);
+
+  const lastSyncedTimeRef = useRef<number>(currentTime);
+  const isHostRef = useRef<boolean>(isHost);
+  const playingRef = useRef<boolean>(playing);
+  const currentTimeRef = useRef<number>(currentTime);
+  const providerRef = useRef<VideoProvider>(provider);
+
+  useEffect(() => {
+    isHostRef.current = isHost;
+    playingRef.current = playing;
+    currentTimeRef.current = currentTime;
+    providerRef.current = provider;
+  }, [isHost, playing, currentTime, provider]);
+
+  const extractedId = propVideoId || extractVideoId(videoUrl)?.id || '';
+
+  // Send postMessage commands to iframe players (VK, YouTube, Rutube, Dzen)
+  const sendIframeCommand = useCallback((action: 'play' | 'pause' | 'seek', time?: number) => {
+    const iframe = iframeRef.current;
+    if (!iframe || !iframe.contentWindow) return;
+    const win = iframe.contentWindow;
+
+    try {
+      if (provider === 'vk') {
+        if (action === 'play') {
+          win.postMessage(JSON.stringify({ method: 'play' }), '*');
+          win.postMessage(JSON.stringify({ type: 'action', action: 'play' }), '*');
+          win.postMessage(JSON.stringify({ event: 'play' }), '*');
+        } else if (action === 'pause') {
+          win.postMessage(JSON.stringify({ method: 'pause' }), '*');
+          win.postMessage(JSON.stringify({ type: 'action', action: 'pause' }), '*');
+          win.postMessage(JSON.stringify({ event: 'pause' }), '*');
+        } else if (action === 'seek' && time !== undefined) {
+          // VK seek logic: pause -> seek -> resume after 150ms if playing
+          win.postMessage(JSON.stringify({ method: 'pause' }), '*');
+          win.postMessage(JSON.stringify({ method: 'seek', param: time }), '*');
+          win.postMessage(JSON.stringify({ type: 'action', action: 'seek', time }), '*');
+          win.postMessage(JSON.stringify({ event: 'seek', time }), '*');
+          if (playingRef.current) {
+            setTimeout(() => {
+              win.postMessage(JSON.stringify({ method: 'play' }), '*');
+            }, 150);
+          }
+        }
+      } else if (provider === 'youtube') {
+        if (action === 'play') {
+          win.postMessage(JSON.stringify({ event: 'command', func: 'playVideo', args: [] }), '*');
+        } else if (action === 'pause') {
+          win.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }), '*');
+        } else if (action === 'seek' && time !== undefined) {
+          win.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [time, true] }), '*');
+        }
+      } else if (provider === 'rutube') {
+        if (action === 'play') {
+          win.postMessage(JSON.stringify({ type: 'player:play' }), '*');
+        } else if (action === 'pause') {
+          win.postMessage(JSON.stringify({ type: 'player:pause' }), '*');
+        } else if (action === 'seek' && time !== undefined) {
+          win.postMessage(JSON.stringify({ type: 'player:setCurrentTime', data: { time } }), '*');
+          win.postMessage(JSON.stringify({ type: 'player:changeTime', data: { time } }), '*');
+        }
+      } else if (provider === 'yandex') {
+        if (action === 'play') {
+          win.postMessage(JSON.stringify({ command: 'play' }), '*');
+        } else if (action === 'pause') {
+          win.postMessage(JSON.stringify({ command: 'pause' }), '*');
+        } else if (action === 'seek' && time !== undefined) {
+          win.postMessage(JSON.stringify({ command: 'seek', time }), '*');
+        }
+      }
+    } catch (e) {
+      console.warn('[UniversalPlayer] sendIframeCommand error:', e);
+    }
+  }, [provider]);
+
+  // Imperative player adapter handle for strict master remote control
+  const playerAdapter: UniversalPlayerRef = {
+    provider,
+    isReady: () => isPlayerReady || (provider === 'direct' ? Boolean(videoRef.current) : true),
+    getCurrentTime: () => {
+      if (videoRef.current) {
+        return videoRef.current.currentTime || internalTime;
+      }
+      return internalTime;
+    },
+    seekTo: (seconds: number) => {
+      setInternalTime(seconds);
+      lastSyncedTimeRef.current = seconds;
+      if (videoRef.current) {
+        if (provider === 'vk') {
+          videoRef.current.pause();
+          videoRef.current.currentTime = seconds;
+          if (playingRef.current) {
+            setTimeout(() => videoRef.current?.play().catch(() => {}), 150);
+          }
+        } else {
+          videoRef.current.currentTime = seconds;
+        }
+      }
+      sendIframeCommand('seek', seconds);
+    },
+    play: () => {
+      if (videoRef.current) {
+        videoRef.current.play().catch(() => {});
+      }
+      sendIframeCommand('play');
+    },
+    pause: () => {
+      if (videoRef.current) {
+        videoRef.current.pause();
+      }
+      sendIframeCommand('pause');
+    },
+    getDuration: () => {
+      if (videoRef.current && videoRef.current.duration) {
+        return videoRef.current.duration;
+      }
+      return durationRef.current;
+    }
+  };
+
+  useImperativeHandle(ref, () => playerAdapter, [isPlayerReady, internalTime, sendIframeCommand, provider]);
+
+  // Bind player to sync engine
+  useEffect(() => {
+    syncEngine.bindPlayer(playerAdapter);
+    syncEngine.setMaster(isHost);
+    return () => {
+      syncEngine.bindPlayer(null);
+    };
+  }, [internalTime, isPlayerReady, sendIframeCommand, isHost, provider]);
+
+  // Mark player as ready on URL mount
+  useEffect(() => {
+    setIsPlayerReady(false);
+    const timer = setTimeout(() => {
+      setIsPlayerReady(true);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [videoUrl, provider]);
+
+  const lastAutoSeekRef = useRef<number>(0);
+
+  // 1. HOST = SOURCE OF TRUTH: Heartbeat cycle every 750 ms (optimal for 10-50 users & Mesh)
+  useEffect(() => {
+    if (!isHost) return;
+
+    const hostInterval = setInterval(() => {
+      const currentHostTime = videoRef.current ? videoRef.current.currentTime : internalTime;
+      const isHostPlaying = playingRef.current;
+      const currentProvider = providerRef.current || 'youtube';
+
+      // Send via syncSocket
+      syncSocket.sendVideoSync({
+        hostTime: currentHostTime,
+        hostPlaying: isHostPlaying,
+        hostProvider: currentProvider,
+        roomId,
+      });
+
+      // Also send directly on raw ws if open
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({
+            type: 'video_sync',
+            roomId,
+            hostTime: currentHostTime,
+            hostPlaying: isHostPlaying,
+            hostProvider: currentProvider,
+          }));
+        } catch {}
+      }
+    }, 750);
+
+    return () => clearInterval(hostInterval);
+  }, [isHost, internalTime, roomId, ws]);
+
+  // 2. GUESTS = SUBORDINATES: Correction cycle every 1000 ms (drift > 0.7s)
+  useEffect(() => {
+    if (isHost) return; // Only guests perform correction loop
+
+    const guestInterval = setInterval(() => {
+      const now = Date.now();
+      if (now - lastAutoSeekRef.current < 1200) return; // Anti-jitter debounce during network lag/buffering
+
+      const localTime = videoRef.current ? videoRef.current.currentTime : internalTime;
+      const hostTime = currentTimeRef.current;
+      const hostPlaying = playingRef.current;
+
+      const drift = Math.abs(localTime - hostTime);
+      if (drift > 0.7) {
+        lastAutoSeekRef.current = now;
+        // Enforce seek based on provider
+        if (videoRef.current) {
+          if (provider === 'vk') {
+            videoRef.current.pause();
+            videoRef.current.currentTime = hostTime;
+            if (hostPlaying) {
+              setTimeout(() => videoRef.current?.play().catch(() => {}), 180);
+            }
+          } else {
+            videoRef.current.currentTime = hostTime;
+          }
+        }
+        setInternalTime(hostTime);
+        sendIframeCommand('seek', hostTime);
+      }
+
+      // Enforce play/pause
+      if (hostPlaying) {
+        if (videoRef.current && videoRef.current.paused) {
+          videoRef.current.play().catch(() => {});
+        }
+        sendIframeCommand('play');
+      } else {
+        if (videoRef.current && !videoRef.current.paused) {
+          videoRef.current.pause();
+        }
+        sendIframeCommand('pause');
+      }
+    }, 1000);
+
+    return () => clearInterval(guestInterval);
+  }, [isHost, provider, internalTime, sendIframeCommand]);
+
+  // 3. HARD SYNC: When props change from Host remote
+  useEffect(() => {
+    if (isHost) return;
+    const video = videoRef.current;
+    
+    // HTML5 Video slave enforcement
+    if (video) {
+      if (Math.abs(video.currentTime - currentTime) > 0.7) {
+        if (provider === 'vk') {
+          video.pause();
+          video.currentTime = currentTime;
+          if (playing) {
+            setTimeout(() => video.play().catch(() => {}), 180);
+          }
+        } else {
+          seekSafe(video, currentTime, playing, provider);
+        }
+      }
+      if (playing && video.paused) {
+        video.play().catch(() => {});
+      } else if (!playing && !video.paused) {
+        video.pause();
+      }
+    }
+
+    // Iframe Player slave enforcement (YouTube, VK, Rutube, Dzen)
+    if (provider !== 'direct') {
+      const diff = Math.abs(internalTime - currentTime);
+      if (diff > 0.7) {
+        setInternalTime(currentTime);
+        lastSyncedTimeRef.current = currentTime;
+        sendIframeCommand('seek', currentTime);
+      }
+      sendIframeCommand(playing ? 'play' : 'pause');
+    }
+  }, [playing, currentTime, provider, isHost, internalTime, sendIframeCommand]);
+
+  // 4. Listen for iframe postMessage events (VK, YouTube, Rutube, Dzen)
+  useEffect(() => {
+    const handleWindowMessage = (event: MessageEvent) => {
+      try {
+        let data = event.data;
+        if (typeof data === 'string') {
+          try {
+            data = JSON.parse(data);
+          } catch (e) {
+            return;
+          }
+        }
+        if (!data || typeof data !== 'object') return;
+
+        let cur: number | undefined = undefined;
+        let dur: number | undefined = undefined;
+
+        // YouTube infoDelivery
+        if (data.info && typeof data.info === 'object') {
+          if (typeof data.info.currentTime === 'number') cur = data.info.currentTime;
+          if (typeof data.info.duration === 'number') dur = data.info.duration;
+        }
+
+        // VK / Rutube data formats
+        if (Array.isArray(data.data)) {
+          if (typeof data.data[0] === 'number') cur = data.data[0];
+          if (typeof data.data[1] === 'number') dur = data.data[1];
+        } else if (data.data && typeof data.data === 'object') {
+          if (typeof data.data.time === 'number') cur = data.data.time;
+          if (typeof data.data.currentTime === 'number') cur = data.data.currentTime;
+          if (typeof data.data.duration === 'number') dur = data.data.duration;
+        }
+
+        // Direct root fields
+        if (typeof data.currentTime === 'number') cur = data.currentTime;
+        if (typeof data.time === 'number') cur = data.time;
+        if (typeof data.duration === 'number') dur = data.duration;
+
+        if (cur !== undefined && !isNaN(cur) && cur >= 0) {
+          setInternalTime(cur);
+          // Only update UI timeline, never override the master remote
+          onTimeUpdate?.(cur);
+        }
+        if (dur !== undefined && !isNaN(dur) && dur > 0) {
+          durationRef.current = dur;
+          onDurationChange?.(dur);
+        }
+      } catch (err) {}
+    };
+
+    window.addEventListener('message', handleWindowMessage);
+    return () => window.removeEventListener('message', handleWindowMessage);
+  }, [onTimeUpdate, onDurationChange]);
+
+  const handleTimeUpdate = () => {
+    if (videoRef.current) {
+      const cur = videoRef.current.currentTime;
+      setInternalTime(cur);
+      if (onTimeUpdate) {
+        onTimeUpdate(cur);
+      }
+    }
+  };
+
+  const handleLoadedMetadata = () => {
+    if (videoRef.current && onDurationChange) {
+      const dur = videoRef.current.duration;
+      if (dur && !isNaN(dur) && dur !== Infinity) {
+        durationRef.current = dur;
+        onDurationChange(dur);
+      }
+    }
+  };
+
+  const toggleFullScreen = () => {
+    if (!containerRef.current) return;
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  };
+
+  if (!videoUrl) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full min-h-[320px] bg-zinc-950 border border-zinc-850 rounded-3xl text-zinc-500 p-6 text-center space-y-3">
+        <div className="w-16 h-16 bg-zinc-900 border border-zinc-800 rounded-2xl flex items-center justify-center text-zinc-400">
+          <Play className="w-8 h-8 stroke-1" />
+        </div>
+        <div className="space-y-1">
+          <h3 className="text-sm font-bold text-zinc-300 uppercase tracking-wider">Плеер готов к трансляции</h3>
+          <p className="text-xs text-zinc-500 max-w-sm">
+            Откройте панель выше и вставьте ссылку на видео (VK, YouTube, Rutube или MP4 файл). Плеер жёстко привязан к пульту управления.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // YouTube Embed
+  if (provider === 'youtube') {
+    const embedUrl = `https://www.youtube.com/embed/${extractedId}?autoplay=${playing ? 1 : 0}&start=${Math.floor(currentTime)}&enablejsapi=1&rel=0`;
+    return (
+      <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl">
+        <iframe
+          ref={iframeRef}
+          src={embedUrl}
+          className="w-full h-full min-h-[320px] border-0"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          allowFullScreen
+          title="YouTube Video"
+        />
+      </div>
+    );
+  }
+
+  // VK Video Embed
+  if (provider === 'vk') {
+    let vkOid = '';
+    let vkId = '';
+    let vkHash = '';
+
+    if (extractedId.includes('_')) {
+      const parts = extractedId.split('_');
+      vkOid = parts[0];
+      vkId = parts[1];
+      if (parts[2]) vkHash = parts[2];
+    }
+
+    const vkEmbedUrl = `https://vk.com/video_ext.php?oid=${vkOid}&id=${vkId}${vkHash ? `&hash=${vkHash}` : ''}&autoplay=${playing ? 1 : 0}&js_api=1`;
+
+    return (
+      <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl">
+        <iframe
+          ref={iframeRef}
+          src={vkEmbedUrl}
+          className="w-full h-full min-h-[320px] border-0"
+          allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+          referrerPolicy="no-referrer"
+          allowFullScreen
+          title="VK Video"
+        />
+      </div>
+    );
+  }
+
+  // Rutube Video Embed
+  if (provider === 'rutube') {
+    const rutubeUrl = `https://rutube.ru/play/embed/${extractedId}?autoplay=${playing ? 1 : 0}`;
+
+    return (
+      <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl">
+        <iframe
+          ref={iframeRef}
+          src={rutubeUrl}
+          className="w-full h-full min-h-[320px] border-0"
+          allow="clipboard-write; autoplay; fullscreen"
+          allowFullScreen
+          title="Rutube Video"
+        />
+      </div>
+    );
+  }
+
+  // Yandex / Dzen Video Embed
+  if (provider === 'yandex') {
+    const dzenUrl = `https://dzen.ru/embed/${extractedId}?from_block=partner&autoplay=${playing ? 1 : 0}`;
+
+    return (
+      <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl">
+        <iframe
+          ref={iframeRef}
+          src={dzenUrl}
+          className="w-full h-full min-h-[320px] border-0"
+          allow="autoplay; encrypted-media; fullscreen"
+          allowFullScreen
+          title="Dzen Video"
+        />
+      </div>
+    );
+  }
+
+  // HTML5 Direct Video
+  return (
+    <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl flex items-center justify-center group">
+      <video
+        ref={videoRef}
+        src={videoUrl}
+        className="w-full h-full max-h-[500px] object-contain"
+        onTimeUpdate={handleTimeUpdate}
+        onLoadedMetadata={handleLoadedMetadata}
+        onEnded={() => onPause && onPause()}
+      />
+
+      <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+        <button
+          type="button"
+          onClick={toggleFullScreen}
+          className="p-2 bg-black/60 hover:bg-black/80 text-white rounded-xl backdrop-blur-md transition-all cursor-pointer border border-white/10"
+          title="На весь экран"
+        >
+          <Maximize className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+});
+
+UniversalPlayer.displayName = 'UniversalPlayer';
+export default UniversalPlayer;

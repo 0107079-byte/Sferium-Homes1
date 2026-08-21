@@ -1,0 +1,8 @@
+{
+  "name": "Homes Sync",
+  "description": "Синхронный просмотр видео с YouTube, VK и Rutube с WebRTC Mesh P2P голосовым чатом, панелью управления хоста, гамбургер-меню, системой push/sound уведомлений и умным ИИ-Ассистентом на базе Gemini (анализ сцены, перевод, модерация, гид).",
+  "requestFramePermissions": ["microphone", "camera"],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

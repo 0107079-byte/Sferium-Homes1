@@ -1,0 +1,44 @@
+{
+  "name": "sferium-homes-sync",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "lint": "tsc --noEmit",
+    "preview": "vite preview",
+    "start": "node dist/server.cjs"
+  },
+  "dependencies": {
+    "@google/genai": "^2.17.1",
+    "clsx": "^2.1.1",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "framer-motion": "^13.1.0",
+    "livekit-client": "^2.21.0",
+    "livekit-server-sdk": "^2.17.0",
+    "lowdb": "^7.0.1",
+    "lucide-react": "^0.344.0",
+    "motion": "^13.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.5.5",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "esbuild": "^0.28.1",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.16",
+    "tsx": "^4.23.9",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.1"
+  }
+}
