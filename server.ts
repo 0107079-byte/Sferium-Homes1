@@ -2353,6 +2353,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
         }
 
         case "exit_room":
+        case "leave_room":
+        case "leave":
           handleCleanLeave(ws);
           break;
 
@@ -2718,20 +2720,31 @@ function handleCleanLeave(ws: WebSocket) {
   delete room.members[conn.userId];
   broadcastLobbyUpdate();
 
-  const activeMembersList = Object.values(room.members);
+  const activeMembersList = Object.values(room.members || {});
+  const activeWsCount = Array.from(clientConnections.values()).filter((c) => c.roomId === conn.roomId).length;
 
-  if (activeMembersList.length === 0) {
-    console.log(`[PRUNE ROOM] Room #${conn.roomId} has 0 participants left. Purging chat, history, player state.`);
-    delete rooms[conn.roomId];
+  if (activeMembersList.length === 0 || activeWsCount === 0) {
+    console.log(`[AUTO-DELETE ROOM] Room #${conn.roomId} has 0 participants left. Purging immediately from memory and database.`);
+    
+    // Broadcast room_closed event so all client instances clean their view
+    broadcastToRoom(conn.roomId, {
+      type: "room_closed",
+      roomId: conn.roomId,
+      reason: "Все участники покинули комнату. Комната закрыта.",
+      message: "Все участники покинули комнату. Комната закрыта.",
+    });
+
     broadcastToRoom(conn.roomId, {
       type: "room:closed",
       roomId: conn.roomId,
       reason: "Все участники покинули комнату. Комната закрыта.",
     });
+
+    delete rooms[conn.roomId];
     try {
       deleteRoomFromDb(conn.roomId);
     } catch (e) {
-      console.warn("Error purging room from DB:", e);
+      console.warn("[AUTO-DELETE ROOM] Error deleting room from DB:", e);
     }
     broadcastLobbyUpdate();
     if (isMediasoupSupported()) {
@@ -2787,8 +2800,18 @@ server.on("upgrade", (req, socket, head) => {
 async function startFullStackServer() {
   try {
     const storedRooms = await getAllRoomsFromDb();
-    Object.assign(rooms, storedRooms);
-    console.log(`[DB] Successfully restored ${Object.keys(storedRooms).length} room(s) from persistent database.`);
+    let restoredCount = 0;
+    for (const [id, r] of Object.entries(storedRooms)) {
+      const memberCount = r.members ? Object.keys(r.members).length : 0;
+      if (memberCount > 0) {
+        rooms[id] = r;
+        restoredCount++;
+      } else {
+        // Prune empty rooms from database on server startup
+        await deleteRoomFromDb(id);
+      }
+    }
+    console.log(`[DB] Successfully restored ${restoredCount} active room(s) from persistent database.`);
     await seedInitialRoomsIfEmpty();
   } catch (err) {
     console.error("[DB] Failed to restore room database:", err);

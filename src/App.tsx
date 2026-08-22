@@ -929,14 +929,15 @@ export function App() {
               break;
 
             case "room:closed":
+            case "room_closed":
             case "room_closed_notification":
               notificationManager.pushNotification({
                 type: 'room_close',
                 title: 'Комната закрыта',
-                message: message.reason || "Комната была закрыта создателем.",
+                message: message.reason || message.message || "Все участники покинули комнату. Комната закрыта.",
                 category: 'host',
               });
-              alert(message.reason || "Комната была закрыта создателем.");
+              alert(message.reason || message.message || "Все участники покинули комнату. Комната закрыта.");
               handleExitRoom();
               break;
 

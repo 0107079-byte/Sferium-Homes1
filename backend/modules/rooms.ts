@@ -167,16 +167,32 @@ export async function listRooms(options?: {
   search?: string;
   hostId?: string;
 }): Promise<RoomSummary[]> {
-  // Sync db rooms to in-memory map
+  // Sync db rooms to in-memory map while pruning any 0-member abandoned rooms
   try {
     const dbRooms = await getAllRoomsFromDb();
     for (const [id, r] of Object.entries(dbRooms)) {
-      if (!rooms[id]) {
-        rooms[id] = r;
+      const memberCount = r.members ? Object.keys(r.members).length : 0;
+      if (memberCount > 0) {
+        if (!rooms[id]) {
+          rooms[id] = r;
+        }
+      } else {
+        // Automatically prune empty room from DB and memory
+        delete rooms[id];
+        await deleteRoomFromDb(id);
       }
     }
   } catch (err) {
     console.warn('[ROOMS] Error checking db rooms:', err);
+  }
+
+  // Filter out any in-memory rooms that have 0 members
+  for (const [id, r] of Object.entries(rooms)) {
+    const memberCount = r.members ? Object.keys(r.members).length : 0;
+    if (memberCount === 0) {
+      delete rooms[id];
+      deleteRoomFromDb(id).catch(() => {});
+    }
   }
 
   let allList = Object.values(rooms).map(toRoomSummary);
@@ -302,15 +318,25 @@ export async function deleteRoom(roomId: string, requesterUserId?: string): Prom
 
   // Kick connected clients and notify them
   const closeMessage = JSON.stringify({
-    type: 'room_closed_notification',
+    type: 'room_closed',
     roomId: cleanId,
+    reason: 'Комната была удалена создателем.',
     message: 'Комната была удалена создателем.',
+  });
+
+  const altCloseMessage = JSON.stringify({
+    type: 'room:closed',
+    roomId: cleanId,
+    reason: 'Комната была удалена создателем.',
   });
 
   for (const [ws, conn] of clientConnections.entries()) {
     if (conn.roomId === cleanId && ws.readyState === WebSocket.OPEN) {
-      ws.send(closeMessage);
-      ws.close();
+      try {
+        ws.send(closeMessage);
+        ws.send(altCloseMessage);
+        ws.close();
+      } catch (e) {}
     }
   }
 
