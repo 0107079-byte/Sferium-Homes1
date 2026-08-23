@@ -1134,23 +1134,39 @@ wss.on("connection", async (ws: WebSocket, req) => {
           }
           break;
 
+        case "video:play":
         case "sync:play":
         case "play_video":
-        case "sync_play":
+        case "sync_play": {
           if (!canControl) return;
           currentRoom.playing = true;
           currentRoom.isPlaying = true;
           if (msg.currentTime !== undefined) {
             currentRoom.currentTime = parseFloat(msg.currentTime);
+          } else if (msg.time !== undefined) {
+            currentRoom.currentTime = parseFloat(msg.time);
           }
-          currentRoom.lastUpdated = Date.now();
+          const playRate = typeof msg.rate === "number" ? msg.rate : 1.0;
+          const playUpdatedAt = msg.updatedAt || Date.now();
+          currentRoom.lastUpdated = playUpdatedAt;
 
           addSystemMessage(currentRoom, `▶ ${member.avatar} ${member.name} включил воспроизведение.`, "play", conn.userId);
+
+          broadcastToRoom(conn.roomId, {
+            type: "video:play",
+            roomId: conn.roomId,
+            time: currentRoom.currentTime,
+            playing: true,
+            rate: playRate,
+            updatedAt: playUpdatedAt,
+            senderId: conn.userId,
+          });
 
           broadcastToRoom(conn.roomId, {
             type: "sync:play",
             roomId: conn.roomId,
             currentTime: currentRoom.currentTime,
+            time: currentRoom.currentTime,
             senderId: conn.userId,
           });
 
@@ -1168,24 +1184,41 @@ wss.on("connection", async (ws: WebSocket, req) => {
 
           saveRoomToDb(currentRoom);
           break;
+        }
 
+        case "video:pause":
         case "sync:pause":
         case "pause_video":
-        case "sync_pause":
+        case "sync_pause": {
           if (!canControl) return;
           currentRoom.playing = false;
           currentRoom.isPlaying = false;
           if (msg.currentTime !== undefined) {
             currentRoom.currentTime = parseFloat(msg.currentTime);
+          } else if (msg.time !== undefined) {
+            currentRoom.currentTime = parseFloat(msg.time);
           }
-          currentRoom.lastUpdated = Date.now();
+          const pauseRate = typeof msg.rate === "number" ? msg.rate : 1.0;
+          const pauseUpdatedAt = msg.updatedAt || Date.now();
+          currentRoom.lastUpdated = pauseUpdatedAt;
 
           addSystemMessage(currentRoom, `⏸ ${member.avatar} ${member.name} поставил на паузу.`, "pause", conn.userId);
+
+          broadcastToRoom(conn.roomId, {
+            type: "video:pause",
+            roomId: conn.roomId,
+            time: currentRoom.currentTime,
+            playing: false,
+            rate: pauseRate,
+            updatedAt: pauseUpdatedAt,
+            senderId: conn.userId,
+          });
 
           broadcastToRoom(conn.roomId, {
             type: "sync:pause",
             roomId: conn.roomId,
             currentTime: currentRoom.currentTime,
+            time: currentRoom.currentTime,
             senderId: conn.userId,
           });
 
@@ -1203,6 +1236,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
 
           saveRoomToDb(currentRoom);
           break;
+        }
 
         case "force_sync":
         case "force_sync_all":
@@ -1280,10 +1314,11 @@ wss.on("connection", async (ws: WebSocket, req) => {
           saveRoomToDb(currentRoom);
           break;
 
+        case "video:seek":
         case "player:seek":
         case "sync:seek":
         case "seek_video":
-        case "sync_seek":
+        case "sync_seek": {
           if (!canControl) return;
           if (msg.currentTime !== undefined) {
             currentRoom.currentTime = parseFloat(msg.currentTime);
@@ -1294,9 +1329,22 @@ wss.on("connection", async (ws: WebSocket, req) => {
             currentRoom.playing = Boolean(msg.playing);
             currentRoom.isPlaying = Boolean(msg.playing);
           }
-          currentRoom.lastUpdated = Date.now();
+          const seekRate = typeof msg.rate === "number" ? msg.rate : 1.0;
+          const seekUpdatedAt = msg.updatedAt || Date.now();
+          currentRoom.lastUpdated = seekUpdatedAt;
 
           addSystemMessage(currentRoom, `⏩ ${member.avatar} ${member.name} перемотал эфир.`, "seek", conn.userId);
+
+          broadcastToRoom(conn.roomId, {
+            type: "video:seek",
+            roomId: conn.roomId,
+            time: currentRoom.currentTime,
+            currentTime: currentRoom.currentTime,
+            playing: currentRoom.playing,
+            rate: seekRate,
+            updatedAt: seekUpdatedAt,
+            senderId: conn.userId,
+          });
 
           broadcastToRoom(conn.roomId, {
             type: "player:seek",
@@ -1337,7 +1385,9 @@ wss.on("connection", async (ws: WebSocket, req) => {
             });
           }
           break;
+        }
 
+        case "video:sync":
         case "sync:state":
         case "video_sync":
         case "player:heartbeat":
@@ -1380,9 +1430,21 @@ wss.on("connection", async (ws: WebSocket, req) => {
             currentRoom.hostProvider = msg.hostProvider;
           }
 
-          const now = Date.now();
+          const rate = typeof msg.rate === "number" ? msg.rate : (typeof msg.playbackRate === "number" ? msg.playbackRate : 1.0);
+          const now = typeof msg.updatedAt === "number" ? msg.updatedAt : Date.now();
           currentRoom.lastUpdated = now;
           currentRoom.lastHeartbeatSyncTime = now;
+
+          // 0. Primary video:sync broadcast for sub-second sync plugins
+          broadcastToRoom(conn.roomId, {
+            type: "video:sync",
+            roomId: currentRoom.roomId,
+            time: currentRoom.currentTime,
+            playing: currentRoom.playing,
+            rate: rate,
+            updatedAt: now,
+            senderId: conn.userId,
+          });
 
           // 1. sync:state broadcast with structured payload
           broadcastToRoom(conn.roomId, {
@@ -1395,6 +1457,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
             payload: {
               time: currentRoom.currentTime,
               playing: currentRoom.playing,
+              rate: rate,
               ts: now,
             },
             senderId: conn.userId,
@@ -1411,6 +1474,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             time: currentRoom.currentTime,
             playing: currentRoom.playing,
             isPlaying: currentRoom.isPlaying,
+            rate: rate,
+            updatedAt: now,
             senderId: conn.userId,
           });
 

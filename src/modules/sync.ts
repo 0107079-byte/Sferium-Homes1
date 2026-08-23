@@ -122,8 +122,8 @@ export async function seekSafe(player: any, time: number, shouldPlay: boolean = 
 
 export class SyncEngine {
   private roomState: RoomState | null = null;
-  // Host = source of truth. Guest drift threshold = 0.7s
-  public driftThreshold: number = 0.7; 
+  // Host = source of truth. Guest drift threshold = 0.3s
+  public driftThreshold: number = 0.3; 
   private boundPlayer: PlayerAdapter | null = null;
   private isMasterRemote: boolean = false;
   private guestSyncInterval: any = null;
@@ -143,10 +143,10 @@ export class SyncEngine {
 
   private startGuestSyncLoop() {
     if (this.guestSyncInterval) clearInterval(this.guestSyncInterval);
-    // Guests check drift every 1000ms
+    // Guests check drift every 800ms
     this.guestSyncInterval = setInterval(() => {
       this.checkGuestAlignment();
-    }, 1000);
+    }, 800);
   }
 
   private checkGuestAlignment() {
@@ -290,8 +290,18 @@ export class SyncEngine {
       this.handleIncomingState(true, time);
     });
 
+    syncSocket.on('video:play', (data: SocketMessage) => {
+      const time = Number(data.time ?? data.currentTime ?? 0);
+      this.handleIncomingState(true, time);
+    });
+
     syncSocket.on('sync:pause', (data: SocketMessage) => {
       const time = Number(data.currentTime ?? 0);
+      this.handleIncomingState(false, time);
+    });
+
+    syncSocket.on('video:pause', (data: SocketMessage) => {
+      const time = Number(data.time ?? data.currentTime ?? 0);
       this.handleIncomingState(false, time);
     });
 
@@ -300,6 +310,37 @@ export class SyncEngine {
       if (!isNaN(targetTime)) {
         this.handleIncomingSeek(targetTime, true);
       }
+    });
+
+    syncSocket.on('video:seek', (data: SocketMessage) => {
+      const targetTime = Number(data.time ?? data.currentTime);
+      if (!isNaN(targetTime)) {
+        this.handleIncomingSeek(targetTime, true);
+      }
+    });
+
+    syncSocket.on('video:sync', (data: SocketMessage) => {
+      const rawHostTime = Number(data.time ?? data.currentTime ?? 0);
+      const hostPlaying = Boolean(data.playing ?? data.isPlaying);
+      const now = Date.now();
+      const packetTransitSec = data.updatedAt ? Math.min(1.5, Math.max(0, (now - data.updatedAt) / 1000)) : 0;
+      const hostTime = hostPlaying ? rawHostTime + packetTransitSec : rawHostTime;
+      if (this.roomState) {
+        this.roomState.hostTime = hostTime;
+        this.roomState.currentTime = hostTime;
+        this.roomState.hostPlaying = hostPlaying;
+        this.roomState.playing = hostPlaying;
+      }
+      this.handleIncomingHeartbeat({
+        roomId: data.roomId || '',
+        senderId: data.senderId || '',
+        time: hostTime,
+        currentTime: hostTime,
+        state: hostPlaying ? 'playing' : 'paused',
+        isPlaying: hostPlaying,
+        playbackRate: data.rate || 1,
+        timestamp: data.updatedAt || Date.now(),
+      });
     });
   }
 

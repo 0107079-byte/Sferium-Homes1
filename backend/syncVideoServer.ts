@@ -40,50 +40,120 @@ export function handleSyncMessage(
   const targetRoomId = room.id || room.roomId;
 
   switch (msg.type) {
-    case "sync:play":
+    case "video:play":
+    case "sync:play": {
+      const playTime = typeof msg.time === "number" ? msg.time : (msg.currentTime !== undefined ? parseFloat(msg.currentTime) : room.videoState.time);
+      const rate = typeof msg.rate === "number" ? msg.rate : 1.0;
+      const updatedAt = msg.updatedAt || Date.now();
       room.videoState.isPlaying = true;
-      room.videoState.updatedAt = Date.now();
+      room.videoState.time = playTime;
+      room.videoState.rate = rate;
+      room.videoState.updatedAt = updatedAt;
       room.playing = true;
       room.isPlaying = true;
-      room.lastUpdated = Date.now();
-      broadcast(targetRoomId, { type: "sync:play", roomId: targetRoomId });
+      room.currentTime = playTime;
+      room.lastUpdated = updatedAt;
+      broadcast(targetRoomId, {
+        type: "video:play",
+        roomId: targetRoomId,
+        time: playTime,
+        playing: true,
+        rate,
+        updatedAt,
+      });
+      broadcast(targetRoomId, { type: "sync:play", roomId: targetRoomId, time: playTime });
       break;
+    }
 
-    case "sync:pause":
+    case "video:pause":
+    case "sync:pause": {
+      const pauseTime = typeof msg.time === "number" ? msg.time : (msg.currentTime !== undefined ? parseFloat(msg.currentTime) : room.videoState.time);
+      const rate = typeof msg.rate === "number" ? msg.rate : 1.0;
+      const updatedAt = msg.updatedAt || Date.now();
       room.videoState.isPlaying = false;
-      room.videoState.updatedAt = Date.now();
+      room.videoState.time = pauseTime;
+      room.videoState.rate = rate;
+      room.videoState.updatedAt = updatedAt;
       room.playing = false;
       room.isPlaying = false;
-      room.lastUpdated = Date.now();
-      broadcast(targetRoomId, { type: "sync:pause", roomId: targetRoomId });
+      room.currentTime = pauseTime;
+      room.lastUpdated = updatedAt;
+      broadcast(targetRoomId, {
+        type: "video:pause",
+        roomId: targetRoomId,
+        time: pauseTime,
+        playing: false,
+        rate,
+        updatedAt,
+      });
+      broadcast(targetRoomId, { type: "sync:pause", roomId: targetRoomId, time: pauseTime });
       break;
+    }
 
-    case "sync:seek":
+    case "video:seek":
+    case "sync:seek": {
       const seekTime = typeof msg.time === "number" ? msg.time : parseFloat(msg.currentTime || 0);
+      const isPlaying = typeof msg.playing === "boolean" ? msg.playing : room.videoState.isPlaying;
+      const rate = typeof msg.rate === "number" ? msg.rate : 1.0;
+      const updatedAt = msg.updatedAt || Date.now();
       room.videoState.time = seekTime;
-      room.videoState.updatedAt = Date.now();
+      room.videoState.isPlaying = isPlaying;
+      room.videoState.rate = rate;
+      room.videoState.updatedAt = updatedAt;
       room.currentTime = seekTime;
-      room.lastUpdated = Date.now();
+      room.playing = isPlaying;
+      room.isPlaying = isPlaying;
+      room.lastUpdated = updatedAt;
+      broadcast(targetRoomId, {
+        type: "video:seek",
+        roomId: targetRoomId,
+        time: seekTime,
+        playing: isPlaying,
+        rate,
+        updatedAt,
+      });
       broadcast(targetRoomId, { type: "sync:seek", roomId: targetRoomId, time: seekTime });
       break;
+    }
 
-    case "sync:state":
+    case "video:sync":
+    case "sync:state": {
       const stateTime = typeof msg.time === "number" ? msg.time : parseFloat(msg.currentTime || 0);
-      const isPlaying = Boolean(msg.isPlaying ?? msg.playing);
+      const isPlaying = Boolean(msg.playing ?? msg.isPlaying);
+      const rate = typeof msg.rate === "number" ? msg.rate : (typeof msg.playbackRate === "number" ? msg.playbackRate : 1.0);
+      const updatedAt = typeof msg.updatedAt === "number" ? msg.updatedAt : Date.now();
+
       room.videoState.time = stateTime;
       room.videoState.isPlaying = isPlaying;
-      room.videoState.updatedAt = Date.now();
+      room.videoState.rate = rate;
+      room.videoState.updatedAt = updatedAt;
       room.currentTime = stateTime;
       room.playing = isPlaying;
       room.isPlaying = isPlaying;
-      room.lastUpdated = Date.now();
+      room.lastUpdated = updatedAt;
+
+      broadcast(targetRoomId, {
+        type: "video:sync",
+        roomId: targetRoomId,
+        time: stateTime,
+        playing: isPlaying,
+        rate,
+        updatedAt,
+      });
       broadcast(targetRoomId, {
         type: "sync:state",
         roomId: targetRoomId,
         time: stateTime,
         isPlaying: isPlaying,
+        payload: {
+          time: stateTime,
+          playing: isPlaying,
+          rate,
+          ts: updatedAt,
+        },
       });
       break;
+    }
   }
 }
 

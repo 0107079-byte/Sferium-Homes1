@@ -1,4 +1,25 @@
 import { autoSyncEngine } from '../utils/AutoSync';
+import {
+  VideoSyncPlugin,
+  HTML5VideoPlayerAdapter,
+  YouTubePlayerAdapter,
+  VKVideoPlayerAdapter,
+  GenericPlayerAdapter,
+  wrapAsUnifiedPlayer,
+  applySync,
+} from '../plugins/videoSync';
+import type { UnifiedPlayer } from '../plugins/videoSync';
+
+export type { UnifiedPlayer };
+export {
+  VideoSyncPlugin,
+  HTML5VideoPlayerAdapter,
+  YouTubePlayerAdapter,
+  VKVideoPlayerAdapter,
+  GenericPlayerAdapter,
+  wrapAsUnifiedPlayer,
+  applySync,
+};
 
 export interface VideoSyncInitOptions {
   roomId: string;
@@ -8,7 +29,8 @@ export interface VideoSyncInitOptions {
   getVKPlayer?: () => any;
   getRutubePlayer?: () => any;
   getUniversalPlayer?: () => any;
-  driftThreshold?: number; // default 0.5s
+  driftThreshold?: number; // default 0.3s
+  isHost?: boolean;
   onSyncEvent?: (event: { type: string; time?: number; isPlaying?: boolean; drift?: number }) => void;
 }
 
@@ -17,6 +39,7 @@ export interface VideoSyncController {
   sendPause: (time?: number) => void;
   sendSeek: (time: number) => void;
   sendState: (time: number, isPlaying: boolean) => void;
+  plugin?: VideoSyncPlugin;
   destroy: () => void;
 }
 
@@ -50,13 +73,23 @@ export class SyncVideoClient {
     this.lastUpdate = Date.now();
   }
 
-  // Хост отправляет состояние каждые 500–1000 мс
-  public hostBroadcast(currentTime: number, isPlaying: boolean) {
+  // Хост отправляет состояние каждые 500 мс
+  public hostBroadcast(currentTime: number, isPlaying: boolean, rate: number = 1.0) {
     if (!this.isHost) return;
 
     this.lastHostTime = currentTime;
     this.lastHostPlaying = isPlaying;
-    this.lastUpdate = Date.now();
+    const now = Date.now();
+    this.lastUpdate = now;
+
+    this.send({
+      type: "video:sync",
+      roomId: this.roomId,
+      time: currentTime,
+      playing: isPlaying,
+      rate,
+      updatedAt: now,
+    });
 
     this.send({
       type: "sync:state",
@@ -65,63 +98,77 @@ export class SyncVideoClient {
       currentTime,
       isPlaying,
       playing: isPlaying,
+      rate,
       payload: {
         time: currentTime,
         playing: isPlaying,
-        ts: Date.now(),
+        rate,
+        ts: now,
       },
     });
   }
 
   // Гость получает состояние от хоста
-  public applyHostState(player: any, payload: { time: number; playing: boolean; ts?: number }) {
+  public applyHostState(player: any, payload: { time: number; playing: boolean; ts?: number; rate?: number }) {
     if (!player) return;
     const hostTime = typeof payload.time === 'number' ? payload.time : 0;
     const hostPlaying = Boolean(payload.playing);
+    const hostRate = typeof payload.rate === 'number' ? payload.rate : 1.0;
 
-    const localTime = typeof player.getCurrentTime === 'function' ? player.getCurrentTime() : (player.currentTime || 0);
-    const drift = Math.abs(localTime - hostTime);
+    const unified = wrapAsUnifiedPlayer(player);
+    const localTime = unified.getCurrentTime();
+    const localPlaying = typeof unified.isPlaying === 'function' ? unified.isPlaying() : false;
+    const localRate = unified.getPlaybackRate();
 
-    // Жёсткая коррекция при расхождении > 0.7 сек
-    if (drift > 0.7) {
-      if (typeof player.seekTo === 'function') {
-        player.seekTo(hostTime);
-      } else if (typeof player.currentTime !== 'undefined') {
-        player.currentTime = hostTime;
-      }
-    }
-
-    // Синхронизация play/pause
-    const isLocalPlaying = typeof player.isPlaying === 'function' ? player.isPlaying() : !player.paused;
-    if (hostPlaying && !isLocalPlaying) {
-      if (typeof player.play === 'function') player.play();
-    }
-    if (!hostPlaying && isLocalPlaying) {
-      if (typeof player.pause === 'function') player.pause();
-    }
+    applySync(unified, localTime, hostTime, localPlaying, hostPlaying, localRate, hostRate, payload.ts);
   }
 
   // Хост → play
-  public sendPlay() {
+  public sendPlay(time?: number) {
     if (!this.isHost) return;
+    const now = Date.now();
+    this.send({
+      type: "video:play",
+      roomId: this.roomId,
+      time,
+      playing: true,
+      updatedAt: now,
+    });
     this.send({
       type: "sync:play",
       roomId: this.roomId,
+      time,
     });
   }
 
   // Хост → pause
-  public sendPause() {
+  public sendPause(time?: number) {
     if (!this.isHost) return;
+    const now = Date.now();
+    this.send({
+      type: "video:pause",
+      roomId: this.roomId,
+      time,
+      playing: false,
+      updatedAt: now,
+    });
     this.send({
       type: "sync:pause",
       roomId: this.roomId,
+      time,
     });
   }
 
   // Хост → seek
   public sendSeek(time: number) {
     if (!this.isHost) return;
+    const now = Date.now();
+    this.send({
+      type: "video:seek",
+      roomId: this.roomId,
+      time,
+      updatedAt: now,
+    });
     this.send({
       type: "sync:seek",
       roomId: this.roomId,
@@ -134,8 +181,7 @@ export class SyncVideoClient {
 
 /**
  * initVideoSync
- * Client-side synchronized playback controller supporting HTML5 Video,
- * YouTube iframe API, VK Video player, and Rutube player.
+ * Client-side synchronized playback controller powered by VideoSyncPlugin.
  */
 export function initVideoSync({
   roomId,
@@ -145,228 +191,70 @@ export function initVideoSync({
   getVKPlayer,
   getRutubePlayer,
   getUniversalPlayer,
-  driftThreshold = 0.5,
+  driftThreshold = 0.3,
+  isHost = false,
   onSyncEvent,
 }: VideoSyncInitOptions): VideoSyncController {
-  let video: HTMLVideoElement | null = null;
-  let yt: any = null;
-  let vk: any = null;
-  let rutube: any = null;
-  let universal: any = null;
-
-  function resolvePlayers() {
+  function getActiveRawPlayer(): any {
     try {
-      video = getVideoElement ? getVideoElement() : null;
-      yt = getYouTubePlayer ? getYouTubePlayer() : null;
-      vk = getVKPlayer ? getVKPlayer() : null;
-      rutube = getRutubePlayer ? getRutubePlayer() : null;
-      universal = getUniversalPlayer ? getUniversalPlayer() : null;
+      const vid = getVideoElement ? getVideoElement() : null;
+      if (vid) return vid;
+      const yt = getYouTubePlayer ? getYouTubePlayer() : null;
+      if (yt) return yt;
+      const vk = getVKPlayer ? getVKPlayer() : null;
+      if (vk) return vk;
+      const ru = getRutubePlayer ? getRutubePlayer() : null;
+      if (ru) return ru;
+      const un = getUniversalPlayer ? getUniversalPlayer() : null;
+      if (un) return un;
     } catch (e) {
-      console.warn('[syncVideoClient] Player resolution error:', e);
+      console.warn('[syncVideoClient] resolve error:', e);
     }
+    return null;
   }
 
-  resolvePlayers();
-
-  const handleMessage = (event: MessageEvent | any) => {
-    try {
-      const dataStr =
-        typeof event.data === 'string'
-          ? event.data
-          : typeof event === 'string'
-          ? event
-          : JSON.stringify(event);
-      const msg =
-        typeof event.data === 'object' &&
-        event.data !== null &&
-        !(event.data instanceof Blob) &&
-        !(event.data instanceof ArrayBuffer)
-          ? event.data
-          : JSON.parse(dataStr);
-
-      if (!msg || (msg.roomId && msg.roomId !== roomId)) return;
-
-      resolvePlayers();
-
-      switch (msg.type) {
-        case 'sync:play':
-        case 'play_video':
-        case 'sync_play': {
-          if (video && typeof video.play === 'function') {
-            video.play().catch(() => {});
-          }
-          if (yt) {
-            if (typeof yt.playVideo === 'function') yt.playVideo();
-            else if (typeof yt.play === 'function') yt.play();
-          }
-          if (vk && typeof vk.play === 'function') {
-            vk.play();
-          }
-          if (rutube && typeof rutube.play === 'function') {
-            rutube.play();
-          }
-          if (universal && typeof universal.play === 'function') {
-            universal.play();
-          }
-          onSyncEvent?.({ type: 'play', isPlaying: true });
-          break;
-        }
-
-        case 'sync:pause':
-        case 'pause_video':
-        case 'sync_pause': {
-          if (video && typeof video.pause === 'function') {
-            video.pause();
-          }
-          if (yt) {
-            if (typeof yt.pauseVideo === 'function') yt.pauseVideo();
-            else if (typeof yt.pause === 'function') yt.pause();
-          }
-          if (vk && typeof vk.pause === 'function') {
-            vk.pause();
-          }
-          if (rutube && typeof rutube.pause === 'function') {
-            rutube.pause();
-          }
-          if (universal && typeof universal.pause === 'function') {
-            universal.pause();
-          }
-          onSyncEvent?.({ type: 'pause', isPlaying: false });
-          break;
-        }
-
-        case 'sync:seek':
-        case 'player:seek':
-        case 'seek_video': {
-          const seekTime = typeof msg.time === 'number' ? msg.time : parseFloat(msg.currentTime || 0);
-          if (typeof seekTime === 'number' && !isNaN(seekTime)) {
-            if (video) video.currentTime = seekTime;
-            if (yt && typeof yt.seekTo === 'function') yt.seekTo(seekTime, true);
-            if (vk && typeof vk.seekTo === 'function') vk.seekTo(seekTime);
-            if (rutube && typeof rutube.seekTo === 'function') rutube.seekTo(seekTime);
-            if (universal && typeof universal.seekTo === 'function') universal.seekTo(seekTime);
-
-            autoSyncEngine.markManualSync(seekTime);
-            onSyncEvent?.({ type: 'seek', time: seekTime });
-          }
-          break;
-        }
-
-        case 'sync:state':
-        case 'player:state':
-        case 'video_sync': {
-          const target =
-            typeof msg.time === 'number'
-              ? msg.time
-              : typeof msg.currentTime === 'number'
-              ? msg.currentTime
-              : typeof msg.hostTime === 'number'
-              ? msg.hostTime
-              : undefined;
-
-          const isPlaying = Boolean(msg.isPlaying ?? msg.playing ?? msg.hostPlaying);
-
-          if (typeof target === 'number' && !isNaN(target)) {
-            // HTML5 Video
-            if (video) {
-              const diff = Math.abs(video.currentTime - target);
-              autoSyncEngine.reportPlaybackTime(video.currentTime, target, isPlaying);
-              if (diff > driftThreshold) {
-                video.currentTime = target;
-              }
-              if (isPlaying && video.paused) {
-                video.play().catch(() => {});
-              } else if (!isPlaying && !video.paused) {
-                video.pause();
-              }
-            }
-
-            // YouTube Player
-            if (yt) {
-              const ytTime = typeof yt.getCurrentTime === 'function' ? yt.getCurrentTime() : 0;
-              const diff = Math.abs(ytTime - target);
-              autoSyncEngine.reportPlaybackTime(ytTime, target, isPlaying);
-              if (diff > driftThreshold && typeof yt.seekTo === 'function') {
-                yt.seekTo(target, true);
-              }
-              if (isPlaying) {
-                if (typeof yt.playVideo === 'function') yt.playVideo();
-                else if (typeof yt.play === 'function') yt.play();
-              } else {
-                if (typeof yt.pauseVideo === 'function') yt.pauseVideo();
-                else if (typeof yt.pause === 'function') yt.pause();
-              }
-            }
-
-            // VK Video Player
-            if (vk) {
-              const vkTime = typeof vk.getCurrentTime === 'function' ? vk.getCurrentTime() : 0;
-              const diff = Math.abs(vkTime - target);
-              autoSyncEngine.reportPlaybackTime(vkTime, target, isPlaying);
-              if (diff > driftThreshold && typeof vk.seekTo === 'function') {
-                vk.seekTo(target);
-              }
-              if (isPlaying && typeof vk.play === 'function') {
-                vk.play();
-              } else if (!isPlaying && typeof vk.pause === 'function') {
-                vk.pause();
-              }
-            }
-
-            // Rutube Player
-            if (rutube) {
-              const rutubeTime = typeof rutube.getCurrentTime === 'function' ? rutube.getCurrentTime() : 0;
-              const diff = Math.abs(rutubeTime - target);
-              autoSyncEngine.reportPlaybackTime(rutubeTime, target, isPlaying);
-              if (diff > driftThreshold && typeof rutube.seekTo === 'function') {
-                rutube.seekTo(target);
-              }
-              if (isPlaying && typeof rutube.play === 'function') {
-                rutube.play();
-              } else if (!isPlaying && typeof rutube.pause === 'function') {
-                rutube.pause();
-              }
-            }
-
-            // Universal Player
-            if (universal) {
-              const uTime = typeof universal.getCurrentTime === 'function' ? universal.getCurrentTime() : 0;
-              const diff = Math.abs(uTime - target);
-              autoSyncEngine.reportPlaybackTime(uTime, target, isPlaying);
-              if (diff > driftThreshold && typeof universal.seekTo === 'function') {
-                universal.seekTo(target);
-              }
-              if (isPlaying && typeof universal.play === 'function') {
-                universal.play();
-              } else if (!isPlaying && typeof universal.pause === 'function') {
-                universal.pause();
-              }
-            }
-
-            onSyncEvent?.({ type: 'state', time: target, isPlaying });
-          }
-          break;
-        }
-      }
-    } catch (err) {
-      // Non-JSON or irrelevant message
-    }
+  // Dynamic player proxy that always forwards to active player instance
+  const dynamicPlayer: UnifiedPlayer = {
+    play: () => {
+      const p = getActiveRawPlayer();
+      if (p) wrapAsUnifiedPlayer(p).play();
+    },
+    pause: () => {
+      const p = getActiveRawPlayer();
+      if (p) wrapAsUnifiedPlayer(p).pause();
+    },
+    seekTo: (time: number) => {
+      const p = getActiveRawPlayer();
+      if (p) wrapAsUnifiedPlayer(p).seekTo(time);
+    },
+    getCurrentTime: () => {
+      const p = getActiveRawPlayer();
+      return p ? wrapAsUnifiedPlayer(p).getCurrentTime() : 0;
+    },
+    getDuration: () => {
+      const p = getActiveRawPlayer();
+      return p ? wrapAsUnifiedPlayer(p).getDuration() : 0;
+    },
+    setPlaybackRate: (rate: number) => {
+      const p = getActiveRawPlayer();
+      if (p) wrapAsUnifiedPlayer(p).setPlaybackRate(rate);
+    },
+    getPlaybackRate: () => {
+      const p = getActiveRawPlayer();
+      return p ? wrapAsUnifiedPlayer(p).getPlaybackRate() : 1.0;
+    },
+    isPlaying: () => {
+      const p = getActiveRawPlayer();
+      return p && wrapAsUnifiedPlayer(p).isPlaying ? wrapAsUnifiedPlayer(p).isPlaying!() : false;
+    },
   };
 
-  if (ws && typeof ws.addEventListener === 'function') {
-    ws.addEventListener('message', handleMessage);
-  } else if (ws && typeof ws.on === 'function') {
-    ws.on('message', handleMessage);
-    ws.on('sync:play', handleMessage);
-    ws.on('sync:pause', handleMessage);
-    ws.on('sync:seek', handleMessage);
-    ws.on('sync:state', handleMessage);
-    ws.on('*', handleMessage);
-  }
+  const plugin = new VideoSyncPlugin(dynamicPlayer, ws, isHost, roomId);
+  plugin.start();
 
   function send(type: string, payload: Record<string, any> = {}) {
     if (!ws) return;
-    const packet = JSON.stringify({ type, roomId, ...payload });
+    const packet = JSON.stringify({ type, roomId, updatedAt: Date.now(), ...payload });
     if (typeof ws.send === 'function') {
       if (ws.readyState === undefined || ws.readyState === WebSocket.OPEN || ws.readyState === 1) {
         ws.send(packet);
@@ -376,23 +264,33 @@ export function initVideoSync({
 
   return {
     sendPlay(time?: number) {
-      send('sync:play', time !== undefined ? { currentTime: time, time } : {});
+      const t = time !== undefined ? time : dynamicPlayer.getCurrentTime();
+      plugin.notifyPlay();
+      send('video:play', { time: t, playing: true });
+      send('sync:play', { currentTime: t, time: t });
+      onSyncEvent?.({ type: 'play', isPlaying: true, time: t });
     },
     sendPause(time?: number) {
-      send('sync:pause', time !== undefined ? { currentTime: time, time } : {});
+      const t = time !== undefined ? time : dynamicPlayer.getCurrentTime();
+      plugin.notifyPause();
+      send('video:pause', { time: t, playing: false });
+      send('sync:pause', { currentTime: t, time: t });
+      onSyncEvent?.({ type: 'pause', isPlaying: false, time: t });
     },
     sendSeek(time: number) {
-      send('sync:seek', { time, currentTime: time });
+      plugin.notifySeek(time);
+      send('video:seek', { time, currentTime: time });
+      send('sync:seek', { time, currentTime: time, payload: { time } });
+      onSyncEvent?.({ type: 'seek', time });
     },
     sendState(time: number, isPlaying: boolean) {
-      send('sync:state', { time, currentTime: time, isPlaying });
+      send('video:sync', { time, currentTime: time, playing: isPlaying, rate: 1.0 });
+      send('sync:state', { time, currentTime: time, isPlaying, playing: isPlaying });
+      onSyncEvent?.({ type: 'state', time, isPlaying });
     },
+    plugin,
     destroy() {
-      if (ws && typeof ws.removeEventListener === 'function') {
-        ws.removeEventListener('message', handleMessage);
-      } else if (ws && typeof ws.off === 'function') {
-        ws.off('message', handleMessage);
-      }
+      plugin.stop();
     },
   };
 }

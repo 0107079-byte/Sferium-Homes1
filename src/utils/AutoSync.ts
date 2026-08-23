@@ -3,6 +3,7 @@
  * Monitored playhead drift, automatic catchup, latency tracking, and sync event broadcasting.
  */
 import { SyncStatusInfo } from '../types';
+import { applySync, wrapAsUnifiedPlayer } from '../plugins/videoSync';
 
 export type AutoSyncState = SyncStatusInfo;
 
@@ -31,7 +32,7 @@ class AutoSyncEngine {
   public reportPlaybackTime(localTime: number, serverTime: number, isPlaying: boolean): { needsSeek: boolean; drift: number } {
     const drift = Math.abs(serverTime - localTime);
     const now = Date.now();
-    const isOutOfSync = drift > 0.4; // 400ms drift threshold
+    const isOutOfSync = drift > 0.3; // Strict 300ms drift threshold
 
     this.status = {
       isSyncing: isOutOfSync,
@@ -50,11 +51,11 @@ class AutoSyncEngine {
         this.status.isSyncing = false;
         this.status.lastSyncedAt = Date.now();
         this.notify();
-      }, 1200);
+      }, 1000);
     }
 
     return {
-      needsSeek: drift > 0.5,
+      needsSeek: drift > 0.3,
       drift,
     };
   }
@@ -72,7 +73,7 @@ class AutoSyncEngine {
     setTimeout(() => {
       this.status.isSyncing = false;
       this.notify();
-    }, 800);
+    }, 500);
   }
 
   public getStatus(): SyncStatusInfo {
@@ -94,36 +95,41 @@ export const autoSyncEngine = new AutoSyncEngine();
 
 /**
  * startAutoSync
- * Timeline drift correction loop running at 1-second interval.
+ * Timeline drift correction loop using hardened applySync algorithm.
  */
-export function startAutoSync(player: any, sync: { currentTime?: number } | any): () => void {
+export function startAutoSync(player: any, sync: { currentTime?: number; isPlaying?: boolean; rate?: number } | any): () => void {
+  const unified = wrapAsUnifiedPlayer(player);
+
   const interval = setInterval(() => {
     if (!player) return;
 
-    const local =
-      typeof player.getCurrentTime === 'function'
-        ? player.getCurrentTime()
-        : player.currentTime !== undefined
-        ? player.currentTime
-        : 0;
+    const localTime = unified.getCurrentTime();
+    const localPlaying = typeof unified.isPlaying === 'function' ? unified.isPlaying() : false;
+    const localRate = unified.getPlaybackRate();
 
-    const host =
+    const hostTime =
       typeof sync.currentTime === 'function'
         ? sync.currentTime()
         : sync.currentTime !== undefined
         ? sync.currentTime
         : 0;
 
-    const drift = Math.abs(local - host);
+    const hostPlaying =
+      typeof sync.isPlaying === 'function'
+        ? sync.isPlaying()
+        : sync.isPlaying !== undefined
+        ? Boolean(sync.isPlaying)
+        : (sync.playing !== undefined ? Boolean(sync.playing) : localPlaying);
 
-    if (drift > 0.7) {
-      if (typeof player.seekTo === 'function') {
-        player.seekTo(host);
-      } else if (typeof player.currentTime !== 'undefined') {
-        player.currentTime = host;
-      }
-    }
-  }, 1000);
+    const hostRate =
+      typeof sync.rate === 'function'
+        ? sync.rate()
+        : sync.rate !== undefined
+        ? Number(sync.rate)
+        : 1.0;
+
+    applySync(unified, localTime, hostTime, localPlaying, hostPlaying, localRate, hostRate);
+  }, 800);
 
   return () => clearInterval(interval);
 }

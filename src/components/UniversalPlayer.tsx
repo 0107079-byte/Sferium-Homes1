@@ -4,6 +4,7 @@ import { VideoProvider } from '../types';
 import { extractVideoId } from '../utils/extractVideoId';
 import { seekSafe, syncEngine, PlayerAdapter } from '../modules/sync';
 import { syncSocket } from '../ws/socket';
+import { VideoSyncPlugin, UnifiedPlayer } from '../plugins/videoSync';
 
 export interface UniversalPlayerRef extends PlayerAdapter {
   getCurrentTime: () => number;
@@ -197,103 +198,57 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
     return () => clearTimeout(timer);
   }, [videoUrl, provider]);
 
-  const lastAutoSeekRef = useRef<number>(0);
+  // VideoSyncPlugin Lifecycle: Replaces legacy fragmented intervals with unified sub-second sync engine
+  const pluginRef = useRef<VideoSyncPlugin | null>(null);
 
-  // 1. HOST = SOURCE OF TRUTH: Heartbeat cycle every 750 ms (optimal for 10-50 users & Mesh)
   useEffect(() => {
-    if (!isHost) return;
+    if (!ws) return;
 
-    const hostInterval = setInterval(() => {
-      const currentHostTime = videoRef.current ? videoRef.current.currentTime : internalTime;
-      const isHostPlaying = playingRef.current;
-      const currentProvider = providerRef.current || 'youtube';
+    const unified: UnifiedPlayer = {
+      play: () => playerAdapter.play(),
+      pause: () => playerAdapter.pause(),
+      seekTo: (seconds: number) => playerAdapter.seekTo(seconds),
+      getCurrentTime: () => playerAdapter.getCurrentTime(),
+      getDuration: () => playerAdapter.getDuration(),
+      setPlaybackRate: () => {},
+      getPlaybackRate: () => 1.0,
+      isPlaying: () => {
+        if (videoRef.current) return !videoRef.current.paused;
+        return playingRef.current;
+      },
+    };
 
-      // Send via syncSocket
-      syncSocket.sendVideoSync({
-        hostTime: currentHostTime,
-        hostPlaying: isHostPlaying,
-        hostProvider: currentProvider,
-        roomId,
-      });
+    const plugin = new VideoSyncPlugin(unified, ws, isHost, roomId || 'CINEMA');
+    pluginRef.current = plugin;
+    plugin.start();
 
-      // Also send directly on raw ws if open
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.send(JSON.stringify({
-            type: 'video_sync',
-            roomId,
-            hostTime: currentHostTime,
-            hostPlaying: isHostPlaying,
-            hostProvider: currentProvider,
-          }));
-        } catch {}
-      }
-    }, 750);
+    return () => {
+      plugin.stop();
+      pluginRef.current = null;
+    };
+  }, [ws, isHost, roomId, provider]);
 
-    return () => clearInterval(hostInterval);
-  }, [isHost, internalTime, roomId, ws]);
-
-  // 2. GUESTS = SUBORDINATES: Correction cycle every 1000 ms (drift > 0.7s)
+  // Host notification hooks for immediate event broadcast
   useEffect(() => {
-    if (isHost) return; // Only guests perform correction loop
+    if (isHost && pluginRef.current) {
+      pluginRef.current.updateHostStatus(true);
+      if (roomId) pluginRef.current.updateRoomId(roomId);
+    }
+  }, [isHost, roomId]);
 
-    const guestInterval = setInterval(() => {
-      const now = Date.now();
-      if (now - lastAutoSeekRef.current < 1200) return; // Anti-jitter debounce during network lag/buffering
-
-      const localTime = videoRef.current ? videoRef.current.currentTime : internalTime;
-      const hostTime = currentTimeRef.current;
-      const hostPlaying = playingRef.current;
-
-      const drift = Math.abs(localTime - hostTime);
-      if (drift > 0.7) {
-        lastAutoSeekRef.current = now;
-        // Enforce seek based on provider
-        if (videoRef.current) {
-          if (provider === 'vk') {
-            videoRef.current.pause();
-            videoRef.current.currentTime = hostTime;
-            if (hostPlaying) {
-              setTimeout(() => videoRef.current?.play().catch(() => {}), 180);
-            }
-          } else {
-            videoRef.current.currentTime = hostTime;
-          }
-        }
-        setInternalTime(hostTime);
-        sendIframeCommand('seek', hostTime);
-      }
-
-      // Enforce play/pause
-      if (hostPlaying) {
-        if (videoRef.current && videoRef.current.paused) {
-          videoRef.current.play().catch(() => {});
-        }
-        sendIframeCommand('play');
-      } else {
-        if (videoRef.current && !videoRef.current.paused) {
-          videoRef.current.pause();
-        }
-        sendIframeCommand('pause');
-      }
-    }, 1000);
-
-    return () => clearInterval(guestInterval);
-  }, [isHost, provider, internalTime, sendIframeCommand]);
-
-  // 3. HARD SYNC: When props change from Host remote
+  // Handle direct player property changes from props (e.g. Host local actions or initial load)
   useEffect(() => {
     if (isHost) return;
     const video = videoRef.current;
     
     // HTML5 Video slave enforcement
     if (video) {
-      if (Math.abs(video.currentTime - currentTime) > 0.7) {
+      if (Math.abs(video.currentTime - currentTime) > 0.3) {
         if (provider === 'vk') {
           video.pause();
           video.currentTime = currentTime;
           if (playing) {
-            setTimeout(() => video.play().catch(() => {}), 180);
+            setTimeout(() => video.play().catch(() => {}), 150);
           }
         } else {
           seekSafe(video, currentTime, playing, provider);
@@ -309,7 +264,7 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
     // Iframe Player slave enforcement (YouTube, VK, Rutube, Dzen)
     if (provider !== 'direct') {
       const diff = Math.abs(internalTime - currentTime);
-      if (diff > 0.7) {
+      if (diff > 0.3) {
         setInternalTime(currentTime);
         lastSyncedTimeRef.current = currentTime;
         sendIframeCommand('seek', currentTime);
