@@ -22,12 +22,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [showScrollButton, setShowScrollButton] = useState(false);
 
   const chatContainerRef = useRef<HTMLDivElement>(null);
-  const chatBottomRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll when new messages arrive if user is near bottom
+  // Auto-scroll inside chat container without scrolling the main page/window
   useEffect(() => {
-    if (!showScrollButton) {
-      chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!showScrollButton && chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
     }
   }, [chatHistory, showScrollButton]);
 
@@ -39,10 +38,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   };
 
   const handleScrollToBottom = () => {
-    chatContainerRef.current?.scrollTo({
-      top: chatContainerRef.current.scrollHeight,
-      behavior: 'smooth',
-    });
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTo({
+        top: chatContainerRef.current.scrollHeight,
+        behavior: 'smooth',
+      });
+    }
     setShowScrollButton(false);
   };
 
@@ -56,20 +57,20 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
   return (
     <div
-      className={`bg-zinc-950/80 border border-purple-500/40 rounded-2xl flex flex-col h-[420px] overflow-hidden relative shadow-2xl shadow-purple-950/30 backdrop-blur-md ${className}`}
+      className={`bg-zinc-950/80 border border-zinc-800 rounded-2xl flex flex-col h-[420px] overflow-hidden relative shadow-lg shadow-black/40 backdrop-blur-md ${className}`}
     >
       {/* Header */}
-      <div className="px-4 py-3 border-b border-purple-500/30 bg-gradient-to-r from-indigo-950/90 via-purple-950/90 to-pink-950/90 flex items-center justify-between shrink-0">
+      <div className="px-4 py-3 border-b border-zinc-800/80 bg-zinc-900/90 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
-          <div className="p-1.5 bg-gradient-to-tr from-indigo-500 to-pink-500 rounded-lg text-white shadow-sm">
+          <div className="p-1.5 bg-zinc-800 rounded-lg text-zinc-200">
             <MessageSquare className="w-4 h-4" />
           </div>
-          <span className="text-xs font-black uppercase tracking-wider text-white">
+          <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">
             Чат Совместного Просмотра
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-[10px] bg-purple-500/20 text-purple-200 border border-purple-400/30 px-2 py-0.5 rounded-full font-bold font-mono">
+          <span className="text-[10px] bg-zinc-800 text-zinc-400 border border-zinc-700 px-2 py-0.5 rounded-full font-bold font-mono">
             {chatHistory.length} сообщ.
           </span>
           <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded-full font-bold font-mono">
@@ -180,7 +181,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             );
           })
         )}
-        <div ref={chatBottomRef} />
       </div>
 
       {/* Floating "Scroll down for new messages" button */}

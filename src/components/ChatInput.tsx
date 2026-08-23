@@ -84,7 +84,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             onChange={(e) => handleInputChange(e.target.value)}
             placeholder={placeholder}
             disabled={disabled}
-            className="w-full bg-zinc-900 text-xs px-3.5 py-2.5 rounded-xl border border-purple-500/40 outline-none focus:border-pink-400 text-white font-bold placeholder-zinc-400 shadow-inner transition-colors"
+            className="w-full bg-zinc-900 text-xs px-3.5 py-2.5 rounded-xl border border-zinc-700 outline-none focus:border-indigo-500 text-white font-medium placeholder-zinc-500 shadow-inner transition-colors"
             title="Сообщение чата"
           />
         </div>
