@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { VideoGrid } from './VideoGrid';
 import { VoicePanel } from './VoicePanel';
 import { RoomDashboard } from './RoomDashboard';
@@ -7,6 +7,7 @@ import { ParticipantList } from './ParticipantList';
 import { RoomState, AppUser, Member } from '../types';
 import UserAvatar from './UserAvatar';
 import { ShieldCheck, User, Users, Mic, Settings } from 'lucide-react';
+import { voiceManager } from '../modules/voice';
 
 export interface RoomProps {
   roomId: string;
@@ -53,6 +54,32 @@ export const Room: React.FC<RoomProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'voice' | 'participants'>('voice');
   const isGuest = userProfile?.isGuest ?? (userId.startsWith('guest_') || !userProfile?.authProvider || userProfile?.authProvider === 'guest');
+
+  const currentUser = {
+    userId,
+    name: userName,
+    avatar: userAvatar,
+    color: userColor,
+  };
+
+  useEffect(() => {
+    if (!roomId || !currentUser?.userId) return;
+    voiceManager
+      .join(roomId, {
+        userId: currentUser.userId,
+        name: currentUser.name,
+        avatar: currentUser.avatar,
+        color: currentUser.color,
+        deviceId: undefined,
+      })
+      .catch((e) => console.error('voice join error', e));
+
+    return () => {
+      try {
+        voiceManager.leave();
+      } catch (e) {}
+    };
+  }, [roomId, currentUser?.userId]);
 
   const members = roomState?.members || {};
 

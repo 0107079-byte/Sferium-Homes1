@@ -1,8 +1,10 @@
 /**
  * WebRTC Mesh Manager (P2P Browser <-> Browser)
- * Direct Peer-to-Peer Voice & Video Chat via WebSocket Signaling
+ * Direct Peer-to-Peer Voice Chat via WebSocket Signaling
  * Fully token-free, API key-free, and LiveKit-free
  */
+
+import { syncSocket } from '../ws/socket';
 
 export interface PeerAudioState {
   userId: string;
@@ -28,7 +30,7 @@ export interface WebRTCMeshState {
   error?: string | null;
 }
 
-type StateListener = (state: WebRTCMeshState) => void;
+export type StateListener = (state: WebRTCMeshState) => void;
 
 export class WebRTCMeshManager {
   private localStream: MediaStream | null = null;
@@ -42,6 +44,8 @@ export class WebRTCMeshManager {
   private silenceTimer: any = null;
   private listeners: Set<StateListener> = new Set();
   private wsSender: ((msg: any) => void) | null = null;
+  private dedicatedWs: WebSocket | null = null;
+  private socketUnsub: (() => void) | null = null;
 
   public roomId: string = '';
   public currentUserId: string = '';
@@ -68,6 +72,10 @@ export class WebRTCMeshManager {
     { urls: 'stun:stun4.l.google.com:19302' },
   ];
 
+  constructor() {
+    this.handleSocketMessage = this.handleSocketMessage.bind(this);
+  }
+
   public setWebSocketSender(sender: (msg: any) => void) {
     this.wsSender = sender;
   }
@@ -90,6 +98,58 @@ export class WebRTCMeshManager {
     this.listeners.forEach((l) => l(s));
   }
 
+  private sendMessage(msg: any) {
+    if (this.wsSender) {
+      try {
+        this.wsSender(msg);
+      } catch (err) {
+        console.warn('[WebRTC Mesh] wsSender error:', err);
+      }
+      return;
+    }
+
+    if (this.dedicatedWs && this.dedicatedWs.readyState === WebSocket.OPEN) {
+      try {
+        this.dedicatedWs.send(JSON.stringify(msg));
+        return;
+      } catch {}
+    }
+
+    // Fallback to syncSocket
+    try {
+      syncSocket.send(msg);
+    } catch {}
+  }
+
+  private initSignaling() {
+    // 1. Subscribe to syncSocket events
+    if (!this.socketUnsub) {
+      this.socketUnsub = syncSocket.subscribe((msg: any) => {
+        this.handleSocketMessage(msg);
+      });
+    }
+
+    // 2. If standalone WebSocket connection needed and syncSocket not connected, open dedicated socket
+    if (!this.dedicatedWs && (!syncSocket || typeof window !== 'undefined')) {
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host;
+        const wsUrl = `${protocol}//${host}/ws?roomId=${encodeURIComponent(this.roomId)}&userId=${encodeURIComponent(this.currentUserId)}`;
+        
+        const ws = new WebSocket(wsUrl);
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            this.handleSocketMessage(data);
+          } catch {}
+        };
+        this.dedicatedWs = ws;
+      } catch (e) {
+        console.warn('[WebRTC Mesh] Dedicated WS fallback error:', e);
+      }
+    }
+  }
+
   /**
    * Подключение к голосовой Mesh-комнате
    */
@@ -107,6 +167,8 @@ export class WebRTCMeshManager {
       this.currentUserName = user.name;
       this.currentUserAvatar = user.avatar || '🍿';
       this.currentUserColor = user.color || '#6366f1';
+
+      this.initSignaling();
 
       // 1. Захват аудио с микрофона пользователя
       const audioConstraints: MediaTrackConstraints = {
@@ -133,19 +195,28 @@ export class WebRTCMeshManager {
       this.state.isConnecting = false;
       this.notify();
 
-      // 3. Отправка сигнала voice:join в WebSocket
-      if (this.wsSender) {
-        this.wsSender({
-          type: 'voice:join',
-          roomId,
-          userId: user.userId,
-          name: user.name,
-          avatar: user.avatar,
-          color: user.color,
-          isMuted: this.state.isMuted,
-          isDeafened: this.state.isDeafened,
-        });
-      }
+      // 3. Отправка сигнала join-voice / voice:join в WebSocket
+      this.sendMessage({
+        type: 'voice:join',
+        roomId,
+        userId: user.userId,
+        name: user.name,
+        avatar: user.avatar,
+        color: user.color,
+        isMuted: this.state.isMuted,
+        isDeafened: this.state.isDeafened,
+      });
+
+      this.sendMessage({
+        type: 'join-voice',
+        roomId,
+        userId: user.userId,
+        name: user.name,
+        avatar: user.avatar,
+        color: user.color,
+        isMuted: this.state.isMuted,
+        isDeafened: this.state.isDeafened,
+      });
 
       return true;
     } catch (err: any) {
@@ -162,10 +233,15 @@ export class WebRTCMeshManager {
    * Отключение от голосовой комнаты
    */
   public disconnectMesh() {
-    // 1. Отправляем сигнал voice:leave
-    if (this.wsSender && this.roomId && this.currentUserId) {
-      this.wsSender({
+    // 1. Отправляем сигнал voice:leave / leave-voice
+    if (this.roomId && this.currentUserId) {
+      this.sendMessage({
         type: 'voice:leave',
+        roomId: this.roomId,
+        userId: this.currentUserId,
+      });
+      this.sendMessage({
+        type: 'leave-voice',
         roomId: this.roomId,
         userId: this.currentUserId,
       });
@@ -193,6 +269,18 @@ export class WebRTCMeshManager {
     // 5. Очищаем аудио контекст VAD
     this.cleanupVAD();
 
+    if (this.socketUnsub) {
+      this.socketUnsub();
+      this.socketUnsub = null;
+    }
+
+    if (this.dedicatedWs) {
+      try {
+        this.dedicatedWs.close();
+      } catch {}
+      this.dedicatedWs = null;
+    }
+
     this.state.isConnected = false;
     this.state.isConnecting = false;
     this.state.isSpeaking = false;
@@ -217,14 +305,12 @@ export class WebRTCMeshManager {
       this.state.audioLevel = 0;
     }
 
-    if (this.wsSender) {
-      this.wsSender({
-        type: 'voice:state',
-        userId: this.currentUserId,
-        isMuted: this.state.isMuted,
-        isDeafened: this.state.isDeafened,
-      });
-    }
+    this.sendMessage({
+      type: 'voice:state',
+      userId: this.currentUserId,
+      isMuted: this.state.isMuted,
+      isDeafened: this.state.isDeafened,
+    });
 
     this.notify();
     return this.state.isMuted;
@@ -246,14 +332,12 @@ export class WebRTCMeshManager {
       this.state.audioLevel = 0;
     }
 
-    if (this.wsSender) {
-      this.wsSender({
-        type: 'voice:state',
-        userId: this.currentUserId,
-        isMuted: this.state.isMuted,
-        isDeafened: this.state.isDeafened,
-      });
-    }
+    this.sendMessage({
+      type: 'voice:state',
+      userId: this.currentUserId,
+      isMuted: this.state.isMuted,
+      isDeafened: this.state.isDeafened,
+    });
 
     this.notify();
   }
@@ -269,14 +353,12 @@ export class WebRTCMeshManager {
       el.muted = this.state.isDeafened;
     });
 
-    if (this.wsSender) {
-      this.wsSender({
-        type: 'voice:state',
-        userId: this.currentUserId,
-        isMuted: this.state.isMuted,
-        isDeafened: this.state.isDeafened,
-      });
-    }
+    this.sendMessage({
+      type: 'voice:state',
+      userId: this.currentUserId,
+      isMuted: this.state.isMuted,
+      isDeafened: this.state.isDeafened,
+    });
 
     this.notify();
     return this.state.isDeafened;
@@ -343,6 +425,87 @@ export class WebRTCMeshManager {
   // ==========================================
   // WEBRTC SIGNALING HANDLERS
   // ==========================================
+
+  public handleSocketMessage(msg: any) {
+    if (!msg || !msg.type) return;
+
+    switch (msg.type) {
+      case 'peers':
+      case 'voice:peers_list':
+      case 'voice:peers': {
+        const peers = Array.isArray(msg.peers) ? msg.peers : [];
+        this.handlePeersList(peers);
+        break;
+      }
+
+      case 'user-joined':
+      case 'voice:user_joined': {
+        const peer = msg.peer || msg;
+        this.handleUserJoined(peer);
+        break;
+      }
+
+      case 'user-left':
+      case 'voice:user_left': {
+        const userId = msg.userId || msg.from;
+        if (userId) this.handleUserLeft(userId);
+        break;
+      }
+
+      case 'offer':
+      case 'voice:offer': {
+        const fromUserId = msg.fromUserId || msg.from;
+        if (fromUserId && msg.offer) {
+          this.handleOffer(fromUserId, msg.offer, {
+            name: msg.name,
+            avatar: msg.avatar,
+            color: msg.color,
+          });
+        }
+        break;
+      }
+
+      case 'answer':
+      case 'voice:answer': {
+        const fromUserId = msg.fromUserId || msg.from;
+        if (fromUserId && msg.answer) {
+          this.handleAnswer(fromUserId, msg.answer);
+        }
+        break;
+      }
+
+      case 'ice':
+      case 'voice:ice':
+      case 'voice:ice_candidate': {
+        const fromUserId = msg.fromUserId || msg.from;
+        const candidate = msg.candidate || msg.ice;
+        if (fromUserId && candidate) {
+          this.handleIceCandidate(fromUserId, candidate);
+        }
+        break;
+      }
+
+      case 'peer-update':
+      case 'voice:state': {
+        const userId = msg.userId || msg.from;
+        if (userId && userId !== this.currentUserId) {
+          this.handlePeerState(userId, msg.isMuted, msg.isDeafened);
+        }
+        break;
+      }
+
+      case 'voice:speaking':
+      case 'voice:active': {
+        const userId = msg.userId || msg.from;
+        if (userId && userId !== this.currentUserId) {
+          const isSpeaking = typeof msg.isSpeaking === 'boolean' ? msg.isSpeaking : Boolean(msg.active);
+          const volume = typeof msg.volume === 'number' ? msg.volume : (msg.audioLevel ?? 0);
+          this.handlePeerSpeaking(userId, isSpeaking, volume);
+        }
+        break;
+      }
+    }
+  }
 
   /**
    * Получение списка участников в голосовом канале от сервера
@@ -435,13 +598,12 @@ export class WebRTCMeshManager {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
-      if (this.wsSender) {
-        this.wsSender({
-          type: 'voice:answer',
-          toUserId: fromUserId,
-          answer,
-        });
-      }
+      this.sendMessage({
+        type: 'voice:answer',
+        toUserId: fromUserId,
+        to: fromUserId,
+        answer,
+      });
     } catch (err) {
       console.error(`[WebRTC Mesh] Ошибка обработки Offer от ${fromUserId}:`, err);
     }
@@ -521,16 +683,15 @@ export class WebRTCMeshManager {
       });
       await pc.setLocalDescription(offer);
 
-      if (this.wsSender) {
-        this.wsSender({
-          type: 'voice:offer',
-          toUserId: remoteUserId,
-          offer,
-          name: this.currentUserName,
-          avatar: this.currentUserAvatar,
-          color: this.currentUserColor,
-        });
-      }
+      this.sendMessage({
+        type: 'voice:offer',
+        toUserId: remoteUserId,
+        to: remoteUserId,
+        offer,
+        name: this.currentUserName,
+        avatar: this.currentUserAvatar,
+        color: this.currentUserColor,
+      });
     } catch (err) {
       console.error(`[WebRTC Mesh] Ошибка создания Offer для ${remoteUserId}:`, err);
     }
@@ -544,11 +705,13 @@ export class WebRTCMeshManager {
 
     // Отправка кандидатов ICE через WebSocket
     pc.onicecandidate = (event) => {
-      if (event.candidate && this.wsSender) {
-        this.wsSender({
+      if (event.candidate) {
+        this.sendMessage({
           type: 'voice:ice_candidate',
           toUserId: remoteUserId,
+          to: remoteUserId,
           candidate: event.candidate,
+          ice: event.candidate,
         });
       }
     };
@@ -698,8 +861,8 @@ export class WebRTCMeshManager {
   }
 
   private broadcastSpeaking(isSpeaking: boolean, volume: number) {
-    if (this.wsSender && this.currentUserId) {
-      this.wsSender({
+    if (this.currentUserId) {
+      this.sendMessage({
         type: 'voice:active',
         userId: this.currentUserId,
         isSpeaking,
@@ -733,4 +896,5 @@ export class WebRTCMeshManager {
   }
 }
 
+export const RTCManager = WebRTCMeshManager;
 export const rtcManager = new WebRTCMeshManager();

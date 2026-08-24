@@ -1639,13 +1639,14 @@ wss.on("connection", async (ws: WebSocket, req) => {
           break;
 
         case "voice:join":
-        case "voice_join": {
+        case "voice_join":
+        case "join-voice": {
           const vRoom = getVoiceRoom(conn.roomId);
           const voiceUser = {
             userId: conn.userId,
-            name: member.name || "Гость",
-            avatar: member.avatar || "🍿",
-            color: member.color || "#a855f7",
+            name: (msg.name || member.name || "Гость"),
+            avatar: (msg.avatar || member.avatar || "🍿"),
+            color: (msg.color || member.color || "#a855f7"),
             isMuted: Boolean(msg.isMuted),
             isDeafened: Boolean(msg.isDeafened),
             isSpeaking: false,
@@ -1654,21 +1655,35 @@ wss.on("connection", async (ws: WebSocket, req) => {
 
           // Send current peers list to joining participant
           const otherPeers = Array.from(vRoom.values()).filter((p) => p.userId !== conn.userId);
-          ws.send(JSON.stringify({
+          const peersPacket = {
             type: "voice:peers_list",
             peers: otherPeers,
+            roomId: conn.roomId,
+          };
+          ws.send(JSON.stringify(peersPacket));
+          ws.send(JSON.stringify({
+            type: "peers",
+            peers: otherPeers,
+            roomId: conn.roomId,
           }));
 
           // Notify everyone else in the room
           broadcastToRoom(conn.roomId, {
             type: "voice:user_joined",
             peer: voiceUser,
+            userId: conn.userId,
+          });
+          broadcastToRoom(conn.roomId, {
+            type: "user-joined",
+            peer: voiceUser,
+            userId: conn.userId,
           });
           break;
         }
 
         case "voice:leave":
-        case "voice_leave": {
+        case "voice_leave":
+        case "leave-voice": {
           const vRoom = getVoiceRoom(conn.roomId);
           if (vRoom.has(conn.userId)) {
             vRoom.delete(conn.userId);
@@ -1676,16 +1691,32 @@ wss.on("connection", async (ws: WebSocket, req) => {
               type: "voice:user_left",
               userId: conn.userId,
             });
+            broadcastToRoom(conn.roomId, {
+              type: "user-left",
+              userId: conn.userId,
+            });
           }
           break;
         }
 
         case "voice:offer":
-        case "voice_offer": {
-          if (msg.toUserId && msg.offer) {
-            sendToUserInRoom(conn.roomId, msg.toUserId, {
+        case "voice_offer":
+        case "offer": {
+          const targetId = msg.toUserId || msg.to;
+          if (targetId && msg.offer) {
+            sendToUserInRoom(conn.roomId, targetId, {
               type: "voice:offer",
               fromUserId: conn.userId,
+              from: conn.userId,
+              offer: msg.offer,
+              name: member.name,
+              avatar: member.avatar,
+              color: member.color,
+            });
+            sendToUserInRoom(conn.roomId, targetId, {
+              type: "offer",
+              fromUserId: conn.userId,
+              from: conn.userId,
               offer: msg.offer,
               name: member.name,
               avatar: member.avatar,
@@ -1696,11 +1727,20 @@ wss.on("connection", async (ws: WebSocket, req) => {
         }
 
         case "voice:answer":
-        case "voice_answer": {
-          if (msg.toUserId && msg.answer) {
-            sendToUserInRoom(conn.roomId, msg.toUserId, {
+        case "voice_answer":
+        case "answer": {
+          const targetId = msg.toUserId || msg.to;
+          if (targetId && msg.answer) {
+            sendToUserInRoom(conn.roomId, targetId, {
               type: "voice:answer",
               fromUserId: conn.userId,
+              from: conn.userId,
+              answer: msg.answer,
+            });
+            sendToUserInRoom(conn.roomId, targetId, {
+              type: "answer",
+              fromUserId: conn.userId,
+              from: conn.userId,
               answer: msg.answer,
             });
           }
@@ -1710,18 +1750,29 @@ wss.on("connection", async (ws: WebSocket, req) => {
         case "voice:ice_candidate":
         case "voice_ice_candidate":
         case "voice:ice":
-        case "voice_ice": {
+        case "voice_ice":
+        case "ice": {
+          const targetId = msg.toUserId || msg.to;
           const cand = msg.candidate || msg.ice;
-          if (msg.toUserId && cand) {
-            sendToUserInRoom(conn.roomId, msg.toUserId, {
+          if (targetId && cand) {
+            sendToUserInRoom(conn.roomId, targetId, {
               type: "voice:ice",
               fromUserId: conn.userId,
+              from: conn.userId,
               candidate: cand,
               ice: cand,
             });
-            sendToUserInRoom(conn.roomId, msg.toUserId, {
+            sendToUserInRoom(conn.roomId, targetId, {
+              type: "ice",
+              fromUserId: conn.userId,
+              from: conn.userId,
+              candidate: cand,
+              ice: cand,
+            });
+            sendToUserInRoom(conn.roomId, targetId, {
               type: "voice:ice_candidate",
               fromUserId: conn.userId,
+              from: conn.userId,
               candidate: cand,
             });
           }
@@ -1729,16 +1780,24 @@ wss.on("connection", async (ws: WebSocket, req) => {
         }
 
         case "voice:state":
-        case "voice_state": {
+        case "voice_state":
+        case "peer-update": {
           const vRoom = getVoiceRoom(conn.roomId);
-          const currentVoice = vRoom.get(conn.userId);
+          const targetId = msg.userId || conn.userId;
+          const currentVoice = vRoom.get(targetId);
           if (currentVoice) {
             if (typeof msg.isMuted === "boolean") currentVoice.isMuted = msg.isMuted;
             if (typeof msg.isDeafened === "boolean") currentVoice.isDeafened = msg.isDeafened;
           }
           broadcastToRoom(conn.roomId, {
             type: "voice:state",
-            userId: conn.userId,
+            userId: targetId,
+            isMuted: msg.isMuted,
+            isDeafened: msg.isDeafened,
+          });
+          broadcastToRoom(conn.roomId, {
+            type: "peer-update",
+            userId: targetId,
             isMuted: msg.isMuted,
             isDeafened: msg.isDeafened,
           });
