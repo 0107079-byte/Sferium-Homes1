@@ -1,11 +1,14 @@
+import path from "path";
+import { fileURLToPath } from "url";
 import dotenv from "dotenv";
-dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, ".env") });
 
 import express from "express";
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import path from "path";
-import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { RoomState, ChatMessage, Member, VideoProvider, UserRole, RolePermissions, DEFAULT_ROLE_PERMISSIONS } from "./src/types";
 import { loadRoomFromDb, saveRoomToDb, deleteRoomFromDb, getAllRoomsFromDb } from "./src/db";
@@ -513,7 +516,7 @@ app.get("/api/vk/resolve", async (req, res) => {
 });
 
 // LiveKit Token generation endpoint for WebRTC Voice & Video
-app.get(["/api/livekit/token", "/api/livekit/token/"], async (req, res) => {
+app.get(["/api/livekit/token", "/api/livekit/token/", "/api/livekit-token", "/api/livekit-token/"], async (req, res) => {
   const roomId = (req.query.roomId as string) || "CINEMA";
   const userId = (req.query.userId as string) || `user_${Math.random().toString(36).substring(2, 9)}`;
   const userName = (req.query.userName as string) || "Гость";
@@ -522,21 +525,35 @@ app.get(["/api/livekit/token", "/api/livekit/token/"], async (req, res) => {
   const apiSecret = process.env.LIVEKIT_API_SECRET || "secret_must_be_32_characters_long_123";
   const livekitUrl = process.env.LIVEKIT_URL || process.env.VITE_LIVEKIT_URL || "wss://livekit.example.com";
 
+  console.log(`[LiveKit Token] Generating token for user="${userName}" (${userId}) in room="${roomId}"`);
+  console.log(`[LiveKit Token] Config: URL="${livekitUrl}", API_KEY="${apiKey ? 'Set' : 'Missing'}", API_SECRET="${apiSecret ? 'Set (' + apiSecret.length + ' chars)' : 'Missing'}"`);
+
   try {
     const at = new AccessToken(apiKey, apiSecret, {
       identity: userId,
       name: userName,
     });
     at.addGrant({ roomJoin: true, room: roomId, canPublish: true, canSubscribe: true });
-    const token = await at.toJwt();
-    return res.json({ token, url: livekitUrl, roomId, userId });
-  } catch (err: any) {
+    
+    // In livekit-server-sdk v2, toJwt() returns Promise<string> or string
+    const jwt = await at.toJwt();
+    const tokenString = typeof jwt === "string" ? jwt : String(jwt);
+    console.log(`[LiveKit Token] Successfully generated JWT token (length=${tokenString.length})`);
+    
     return res.json({
-      token: `mock_livekit_token_${userId}_${roomId}`,
+      token: tokenString,
       url: livekitUrl,
       roomId,
       userId,
-      error: err.message,
+    });
+  } catch (err: any) {
+    console.error("[LiveKit Token] Error generating token:", err);
+    return res.status(500).json({
+      token: "",
+      url: livekitUrl,
+      roomId,
+      userId,
+      error: err.message || "Failed to generate LiveKit access token",
     });
   }
 });
