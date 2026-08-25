@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VideoSync Room Watcher</title>
+  <!-- HLS.js для поддержки потокового воспроизведения m3u8 -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <!-- Подключение VideoSyncPlugin -->
+  <script src="/video-sync-plugin.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #090d16;
+      color: #f8fafc;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .app-container {
+      max-width: 1040px;
+      width: 100%;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .room-title {
+      font-size: 22px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #ffffff;
+    }
+    .room-badge {
+      background: #1e293b;
+      padding: 3px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #38bdf8;
+      border: 1px solid #334155;
+    }
+    .status-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      padding: 6px 12px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .badge.host { background: #059669; color: #ecfdf5; }
+    .badge.guest { background: #475569; color: #f1f5f9; }
+    .badge.users { background: #1e293b; border: 1px solid #334155; color: #cbd5e1; }
+    
+    .video-wrapper {
+      position: relative;
+      background: #000000;
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.7);
+      aspect-ratio: 16 / 9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #1e293b;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .controls-card {
+      margin-top: 20px;
+      padding: 18px 20px;
+      background: #131b2e;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      border: 1px solid #1e293b;
+    }
+    .input-row {
+      display: flex;
+      gap: 10px;
+    }
+    input[type="text"] {
+      flex: 1;
+      padding: 11px 14px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #090d16;
+      color: #ffffff;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input[type="text"]:focus {
+      border-color: #6366f1;
+    }
+    button {
+      padding: 11px 20px;
+      border-radius: 8px;
+      border: none;
+      background: #6366f1;
+      color: #ffffff;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+    button:hover:not(:disabled) {
+      background: #4f46e5;
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .btn-secondary {
+      background: #334155;
+    }
+    .btn-secondary:hover:not(:disabled) {
+      background: #475569;
+    }
+    .meta-bar {
+      font-size: 13px;
+      color: #94a3b8;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <div class="header">
+      <div class="room-title">
+        🎬 Синхронный медиа-зал
+        <span class="room-badge" id="roomLabel">комната: ...</span>
+      </div>
+      <div class="status-group">
+        <span class="badge users" id="usersBadge">👥 Участников: 1</span>
+        <span class="badge guest" id="roleBadge">Подключение...</span>
+        <button id="claimHostBtn" class="btn-secondary" style="display: none; padding: 6px 12px; font-size: 12px;">Стать хостом</button>
+      </div>
+    </div>
+
+    <div class="video-wrapper">
+      <video id="videoPlayer" playsinline></video>
+    </div>
+
+    <div class="controls-card">
+      <div class="input-row">
+        <input type="text" id="sourceInput" placeholder="Вставьте прямую ссылку (MP4 / WebM / HLS .m3u8)...">
+        <button id="changeSourceBtn">Сменить видео</button>
+      </div>
+      <div class="meta-bar">
+        <span id="syncInfoText">Синхронизация инициализируется...</span>
+        <span id="wsStateText">WS: Подключение...</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 1. Инициализация параметров комнаты из URL (?room=...)
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomId = urlParams.get('room') || 'cinema_hall_1';
+
+    const videoElement = document.getElementById('videoPlayer');
+    const roleBadge = document.getElementById('roleBadge');
+    const usersBadge = document.getElementById('usersBadge');
+    const roomLabel = document.getElementById('roomLabel');
+    const sourceInput = document.getElementById('sourceInput');
+    const changeSourceBtn = document.getElementById('changeSourceBtn');
+    const claimHostBtn = document.getElementById('claimHostBtn');
+    const syncInfoText = document.getElementById('syncInfoText');
+    const wsStateText = document.getElementById('wsStateText');
+
+    roomLabel.innerText = `комната: ${roomId}`;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}`;
+
+    // 2. Создание экземпляра VideoSyncPlugin
+    const syncPlugin = new VideoSyncPlugin({
+      wsUrl,
+      roomId,
+      videoElement,
+      onHostChange: (isHost) => {
+        if (isHost) {
+          roleBadge.className = 'badge host';
+          roleBadge.innerText = '👑 Вы — хост';
+          claimHostBtn.style.display = 'none';
+          sourceInput.disabled = false;
+          changeSourceBtn.disabled = false;
+          syncInfoText.innerText = 'Вы управляете воспроизведением в комнате.';
+        } else {
+          roleBadge.className = 'badge guest';
+          roleBadge.innerText = '👀 Вы — гость';
+          claimHostBtn.style.display = 'inline-block';
+          sourceInput.disabled = true;
+          changeSourceBtn.disabled = true;
+          syncInfoText.innerText = 'Синхронизация с хостом комнаты...';
+        }
+      },
+      onStateChange: (event, payload) => {
+        if (event === 'connected') {
+          wsStateText.innerText = 'WS: Подключено';
+        } else if (event === 'disconnected') {
+          wsStateText.innerText = 'WS: Отключено (переподключение...)';
+        } else if (event === 'user_joined' || event === 'user_left' || event === 'init') {
+          if (payload && payload.totalUsers !== undefined) {
+            usersBadge.innerText = `👥 Участников: ${payload.totalUsers}`;
+          }
+        } else if (event === 'source_changed') {
+          const srcName = payload.src || payload.url || 'новый поток';
+          syncInfoText.innerText = `Источник изменен: ${srcName}`;
+        }
+      }
+    });
+
+    // 3. Обработчики управления
+    changeSourceBtn.addEventListener('click', () => {
+      const url = sourceInput.value.trim();
+      if (!url) return;
+      syncPlugin.changeSource(url);
+    });
+
+    claimHostBtn.addEventListener('click', () => {
+      syncPlugin.claimHost();
+    });
+  </script>
+</body>
+</html>
