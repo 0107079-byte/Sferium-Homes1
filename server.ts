@@ -294,7 +294,7 @@ const renderExpressCallbackHtml = (provider: string, token: string | null, error
 };
 
 app.get(["/api/auth/:provider/callback", "/api/auth/:provider/callback/"], async (req, res) => {
-  const provider = req.params.provider.toLowerCase();
+  const provider = String(req.params.provider || "").toLowerCase();
   const code = req.query.code as string;
   const error = req.query.error as string;
 
