@@ -48,6 +48,7 @@ import {
 
 import { videoRouter } from "./backend/routes/video";
 import { handleSyncMessage } from "./backend/syncVideoServer";
+import { publishRoomEvent, subscribeToRoomEvents, INSTANCE_ID } from "./src/services/redisPubSub";
 import { AccessToken } from "livekit-server-sdk";
 import {
   serverAnalyzeScene,
@@ -630,8 +631,8 @@ function serverExtractVideoId(url: string, provider: VideoProvider): string {
   return cleanUrl;
 }
 
-// Broadcast helper
-function broadcastToRoom(roomId: string, message: any) {
+// Broadcast helper - local instance delivery
+function broadcastToRoomLocal(roomId: string, message: any) {
   if (message && message.type === "room_state" && message.state) {
     updateRoomCurrentTime(roomId);
     message.state = rooms[roomId];
@@ -642,6 +643,14 @@ function broadcastToRoom(roomId: string, message: any) {
       ws.send(payload);
     }
   }
+}
+
+// Broadcast helper - distributed delivery across server instances via Redis Pub/Sub
+function broadcastToRoom(roomId: string, message: any) {
+  broadcastToRoomLocal(roomId, message);
+  publishRoomEvent(roomId, message).catch((err) => {
+    console.warn(`[Redis PubSub] Failed to publish event for room ${roomId}:`, err);
+  });
 }
 
 // Send direct message to a specific user in a room
@@ -2976,7 +2985,12 @@ async function startFullStackServer() {
   }
 
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(`[SERVER] Sync TV Server running at http://0.0.0.0:${PORT}`);
+    console.log(`[SERVER] Sync TV Server running at http://0.0.0.0:${PORT} (Instance ID: ${INSTANCE_ID})`);
+
+    // Subscribe to multi-instance room events from Redis Pub/Sub
+    subscribeToRoomEvents((incomingRoomId, incomingMessage) => {
+      broadcastToRoomLocal(incomingRoomId, incomingMessage);
+    });
   });
 }
 
