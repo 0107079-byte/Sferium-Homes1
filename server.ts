@@ -1081,7 +1081,10 @@ wss.on("connection", async (ws: WebSocket, req) => {
           
           const isFirst = Object.keys(currentRoomObj.members).length === 0;
           const isExist = !!currentRoomObj.members[targetUserId];
-          const hostStatus = isExist ? currentRoomObj.members[targetUserId].isHost : isFirst;
+          const isRecognizedHost = currentRoomObj.hostId === targetUserId;
+          const hostStatus = isExist
+            ? currentRoomObj.members[targetUserId].isHost
+            : (isFirst || isRecognizedHost);
           
           if (hostStatus) {
             currentRoomObj.hostId = targetUserId;

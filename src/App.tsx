@@ -363,7 +363,7 @@ export function App() {
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const currentMember = roomState?.members[userId];
-  const isHost = currentMember?.isHost || false;
+  const isHost = currentMember?.isHost || roomState?.hostId === userId || false;
   const canIControl = isHost || anyoneCanControl;
 
   const handleSaveProfile = (profile: Partial<UserProfile>) => {
