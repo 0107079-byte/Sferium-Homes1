@@ -28,6 +28,8 @@ export interface VideoSyncPayload {
   playing: boolean;
   rate: number;
   updatedAt: number;
+  revision?: number;
+  serverTime?: number;
 }
 
 export interface VideoSyncMessage {
@@ -40,6 +42,8 @@ export interface VideoSyncMessage {
   rate?: number;
   playbackRate?: number;
   updatedAt?: number;
+  serverTime?: number;
+  revision?: number;
   payload?: any;
 }
 
@@ -556,11 +560,17 @@ export class VideoSyncPlugin {
   private isRunning: boolean = false;
   private lastSeekCooldown: number = 0;
 
+  public lastAppliedRevision: number = 0;
+  public clockOffset: number = 0; // clientTime - serverTime
+  public isApplyingRemoteUpdate: boolean = false;
+
   private lastHostState: {
     time: number;
     playing: boolean;
     rate: number;
     updatedAt: number;
+    serverTime?: number;
+    revision?: number;
   } = {
     time: 0,
     playing: false,
@@ -581,6 +591,27 @@ export class VideoSyncPlugin {
     this.ws = ws;
     this.isHost = isHost;
     this.roomId = roomId;
+  }
+
+  /**
+   * Calculates current estimated server time based on measured clock offset
+   */
+  public calculateServerNow(): number {
+    return Date.now() - this.clockOffset;
+  }
+
+  /**
+   * Computes estimated server playback position
+   */
+  public calculateEstimatedServerPosition(): number {
+    if (!this.lastHostState.playing) {
+      return this.lastHostState.time;
+    }
+    const currentServerTime = this.calculateServerNow();
+    const baseServerTime = this.lastHostState.serverTime || this.lastHostState.updatedAt || currentServerTime;
+    const elapsedSeconds = Math.max(0, (currentServerTime - baseServerTime) / 1000);
+    const rate = this.lastHostState.rate > 0 ? this.lastHostState.rate : 1.0;
+    return this.lastHostState.time + elapsedSeconds * rate;
   }
 
   /**
@@ -694,6 +725,7 @@ export class VideoSyncPlugin {
         playing: isPlaying,
         rate: rate,
         updatedAt: now,
+        serverTime: now,
       };
 
       this.sendWsMessage({
@@ -719,6 +751,7 @@ export class VideoSyncPlugin {
       playing: true,
       rate,
       updatedAt: now,
+      serverTime: now,
     });
   }
 
@@ -738,6 +771,7 @@ export class VideoSyncPlugin {
       playing: false,
       rate,
       updatedAt: now,
+      serverTime: now,
     });
   }
 
@@ -757,6 +791,7 @@ export class VideoSyncPlugin {
       playing: isPlaying,
       rate,
       updatedAt: now,
+      serverTime: now,
     });
   }
 
@@ -777,7 +812,7 @@ export class VideoSyncPlugin {
   }
 
   /**
-   * Performs comparison with latest Host state
+   * Performs comparison with latest Host/Server state
    */
   public alignGuestWithHost(): ApplySyncResult | null {
     if (!this.player) return null;
@@ -792,22 +827,50 @@ export class VideoSyncPlugin {
     const localPlaying = typeof this.player.isPlaying === 'function' ? this.player.isPlaying() : false;
     const localRate = this.player.getPlaybackRate() || 1.0;
 
-    const result = applySync(
-      this.player,
-      localTime,
-      this.lastHostState.time,
-      localPlaying,
-      this.lastHostState.playing,
-      localRate,
-      this.lastHostState.rate,
-      this.lastHostState.updatedAt
-    );
+    const estimatedServerPosition = this.calculateEstimatedServerPosition();
+    const drift = Math.abs(localTime - estimatedServerPosition);
 
-    if (result.seeked) {
-      this.lastSeekCooldown = now;
+    let seeked = false;
+    let stateChanged = false;
+    let rateChanged = false;
+
+    this.isApplyingRemoteUpdate = true;
+    try {
+      // 1. Hard seek if drift > 0.4s
+      if (drift > 0.4) {
+        this.player.seekTo(estimatedServerPosition);
+        seeked = true;
+        this.lastSeekCooldown = now;
+      }
+
+      // 2. Sync play/pause state
+      if (this.lastHostState.playing && !localPlaying) {
+        this.player.play();
+        stateChanged = true;
+      } else if (!this.lastHostState.playing && localPlaying) {
+        this.player.pause();
+        stateChanged = true;
+      }
+
+      // 3. Sync rate
+      const targetRate = this.lastHostState.rate > 0 ? this.lastHostState.rate : 1.0;
+      if (Math.abs(targetRate - localRate) > 0.01) {
+        this.player.setPlaybackRate(targetRate);
+        rateChanged = true;
+      }
+    } finally {
+      setTimeout(() => {
+        this.isApplyingRemoteUpdate = false;
+      }, 50);
     }
 
-    return result;
+    return {
+      seeked,
+      stateChanged,
+      rateChanged,
+      drift,
+      correctedHostTime: estimatedServerPosition,
+    };
   }
 
   // ----------------------------------------------------
@@ -866,6 +929,19 @@ export class VideoSyncPlugin {
       return;
     }
 
+    // Monotonic Revision Guard: reject stale / out-of-order revisions
+    if (typeof msg.revision === 'number' && msg.revision > 0) {
+      if (msg.revision <= this.lastAppliedRevision) {
+        return; // Stale message rejected
+      }
+      this.lastAppliedRevision = msg.revision;
+    }
+
+    // Clock offset estimation from server timestamp
+    if (typeof msg.serverTime === 'number' && msg.serverTime > 0) {
+      this.clockOffset = Date.now() - msg.serverTime;
+    }
+
     const type = msg.type;
 
     // Normalizing sync message types
@@ -874,7 +950,7 @@ export class VideoSyncPlugin {
     const isPauseEvent = type === 'video:pause' || type === 'sync:pause' || type === 'pause_video' || type === 'sync_pause';
     const isSeekEvent = type === 'video:seek' || type === 'sync:seek' || type === 'seek_video' || type === 'sync_seek' || type === 'player:seek';
 
-    if (!isSyncEvent && !isPlayEvent && !isPauseEvent && !isSeekEvent && type !== 'player:state') {
+    if (!isSyncEvent && !isPlayEvent && !isPauseEvent && !isSeekEvent && type !== 'player:state' && type !== 'room_state') {
       return;
     }
 
@@ -910,36 +986,45 @@ export class VideoSyncPlugin {
       playing,
       rate,
       updatedAt,
+      serverTime: msg.serverTime || updatedAt,
+      revision: msg.revision,
     };
 
     // If we are a guest, react immediately to event-driven updates
     if (!this.isHost) {
-      if (isPlayEvent) {
-        this.lastHostState.playing = true;
-        this.player.play();
-        if (time > 0) {
-          const localTime = this.player.getCurrentTime();
-          if (Math.abs(localTime - time) > 0.3) {
+      this.isApplyingRemoteUpdate = true;
+      try {
+        if (isPlayEvent) {
+          this.lastHostState.playing = true;
+          this.player.play();
+          if (time > 0) {
+            const localTime = this.player.getCurrentTime();
+            if (Math.abs(localTime - time) > 0.3) {
+              this.player.seekTo(time);
+            }
+          }
+        } else if (isPauseEvent) {
+          this.lastHostState.playing = false;
+          this.player.pause();
+          if (time > 0) {
             this.player.seekTo(time);
           }
-        }
-      } else if (isPauseEvent) {
-        this.lastHostState.playing = false;
-        this.player.pause();
-        if (time > 0) {
+        } else if (isSeekEvent) {
           this.player.seekTo(time);
-        }
-      } else if (isSeekEvent) {
-        this.player.seekTo(time);
-        this.lastSeekCooldown = Date.now();
-        if (playing) {
-          this.player.play();
+          this.lastSeekCooldown = Date.now();
+          if (playing) {
+            this.player.play();
+          } else {
+            this.player.pause();
+          }
         } else {
-          this.player.pause();
+          // Periodic sync event -> apply anti-drift
+          this.alignGuestWithHost();
         }
-      } else {
-        // Periodic sync event -> apply anti-drift
-        this.alignGuestWithHost();
+      } finally {
+        setTimeout(() => {
+          this.isApplyingRemoteUpdate = false;
+        }, 50);
       }
     }
   }

@@ -33,7 +33,7 @@ import HamburgerMenu from "./components/HamburgerMenu";
 import Lobby from "./components/Lobby";
 import { AIProvider } from "./context/AIContext";
 import { RoomState, ChatMessage, VideoProvider, RoomSummary, CreateRoomPayload, UserStatus, UserAudioSettings, UserVideoSettings, UserProfile } from "./types";
-import { fetchRoomsApi, createRoomApi, deleteRoomApi } from "./services/rooms";
+import { fetchRoomsApi, createRoomApi, deleteRoomApi, joinRoomApi, fetchRoomByIdApi } from "./services/rooms";
 import { syncSocket } from "./ws/socket";
 import { rtcManager } from "./modules/rtc";
 import { userManager } from "./modules/user";
@@ -242,6 +242,8 @@ export function App() {
   const [isInRoom, setIsInRoom] = useState(false);
   const [copied, setCopied] = useState(false);
   const [inviteError, setInviteError] = useState("");
+  const [joinError, setJoinError] = useState<{ roomId: string; message: string; notFound?: boolean } | null>(null);
+  const [isJoiningRoom, setIsJoiningRoom] = useState(false);
 
   // Lobby rooms state
   const [lobbyRooms, setLobbyRooms] = useState<RoomSummary[]>([]);
@@ -303,11 +305,36 @@ export function App() {
   }, [isInRoom, userId, userName, userAvatar, userColor]);
 
   const handleCreateRoom = async (payload: CreateRoomPayload) => {
-    const result = await createRoomApi(payload);
-    if (result.success && result.room) {
-      handleJoinOrCreateRoom(result.room.roomId);
-    } else {
-      throw new Error(result.error || "Не удалось создать комнату");
+    setIsJoiningRoom(true);
+    setJoinError(null);
+    try {
+      const fullPayload: CreateRoomPayload = {
+        ...payload,
+        hostId: userId,
+        hostName: userName,
+        hostAvatar: userAvatar,
+        hostColor: userColor,
+      };
+      const result = await createRoomApi(fullPayload);
+      if (result.success && result.room) {
+        const newRoom = result.room;
+        const cleanRoomId = newRoom.roomId;
+        setRoomId(cleanRoomId);
+        setRoomState(newRoom);
+        setIsInRoom(true);
+        setJoinError(null);
+        addRoomToHistory(cleanRoomId);
+        window.history.pushState({}, "", `/room/${cleanRoomId}`);
+
+        setupBroadcastChannel(cleanRoomId);
+        connectRoomWebSocket(cleanRoomId);
+      } else {
+        throw new Error(result.error || "Не удалось создать комнату");
+      }
+    } catch (err: any) {
+      alert(err.message || "Ошибка при создании комнаты");
+    } finally {
+      setIsJoiningRoom(false);
     }
   };
 
@@ -458,52 +485,7 @@ export function App() {
     }
   }, [roomState?.videoUrl, roomState?.videoId, roomState?.provider]);
 
-  const handleJoinOrCreateRoom = (targetRoomId: string) => {
-    const cleanRoomId = parseRoomId(targetRoomId) || "CINEMA";
-    setRoomId(cleanRoomId);
-    setIsInRoom(true);
-    addRoomToHistory(cleanRoomId);
-
-    window.history.pushState({}, "", `/room/${cleanRoomId}`);
-
-    // Initialize local roomState immediately so player works even without WS backend
-    const initialRoomState: RoomState = {
-      roomId: cleanRoomId,
-      hostId: userId,
-      videoUrl: "",
-      provider: "unknown",
-      currentTime: 0,
-      playing: false,
-      playbackRate: 1,
-      members: {
-        [userId]: {
-          id: userId,
-          userId: userId,
-          name: userName,
-          avatar: userAvatar,
-          color: userColor,
-          isHost: false, // Server will assign true host status in room_state
-        }
-      },
-      chatHistory: [
-        {
-          id: "sys_1",
-          type: "system",
-          text: `Зал ${cleanRoomId} готов. Вставьте ссылку на видео или выберите из списка!`,
-          timestamp: Date.now()
-        }
-      ],
-      anyoneCanControl: false,
-    };
-
-    setRoomState((prev) => {
-      if (!prev || prev.roomId !== cleanRoomId) {
-        return initialRoomState;
-      }
-      return prev;
-    });
-
-    // Set up BroadcastChannel for local/multi-tab sync
+  const setupBroadcastChannel = (cleanRoomId: string) => {
     if (broadcastChannelRef.current) {
       broadcastChannelRef.current.close();
     }
@@ -541,7 +523,9 @@ export function App() {
     } catch (e) {
       console.warn("BroadcastChannel error:", e);
     }
+  };
 
+  const connectRoomWebSocket = (cleanRoomId: string) => {
     if (wsRef.current) {
       wsRef.current.close();
     }
@@ -666,7 +650,18 @@ export function App() {
               break;
             }
             case "error":
-              alert(message.message);
+              if (message.code === 'ROOM_NOT_FOUND' || message.error === 'ROOM_NOT_FOUND') {
+                setJoinError({
+                  roomId: cleanRoomId,
+                  message: message.message || `Комната #${cleanRoomId} не найдена в базе данных`,
+                  notFound: true,
+                });
+                setIsInRoom(false);
+                setRoomState(null);
+                window.history.pushState({}, "", "/");
+              } else {
+                alert(message.message || "Ошибка");
+              }
               break;
             case "voice:peers_list":
               if (Array.isArray(message.peers)) {
@@ -977,6 +972,69 @@ export function App() {
     }
   };
 
+  /**
+   * Explicit Join Room flow:
+   * Validates room in PostgreSQL via joinRoomApi (NEVER creates room)
+   */
+  const handleJoinRoom = async (targetRoomId: string, password?: string) => {
+    const cleanRoomId = parseRoomId(targetRoomId);
+    if (!cleanRoomId) {
+      setJoinError({ roomId: targetRoomId, message: "Некорректный код комнаты", notFound: true });
+      setIsInRoom(false);
+      return;
+    }
+
+    setIsJoiningRoom(true);
+    setJoinError(null);
+
+    try {
+      console.log(`[JOIN_START] Attempting to join room #${cleanRoomId} as user ${userId} (${userName})`);
+      const result = await joinRoomApi(cleanRoomId, {
+        userId,
+        name: userName,
+        avatar: userAvatar,
+        color: userColor,
+        password,
+      });
+
+      if (!result.success) {
+        console.warn(`[JOIN_FAILED] Room #${cleanRoomId} not joined:`, result.error);
+        setIsInRoom(false);
+        setRoomState(null);
+        setJoinError({
+          roomId: cleanRoomId,
+          message: result.error || `Комната #${cleanRoomId} не найдена в базе данных`,
+          notFound: result.notFound || result.code === 'ROOM_NOT_FOUND',
+        });
+        return;
+      }
+
+      console.log(`[JOIN_SUCCESS] Joined room #${cleanRoomId} successfully:`, result.room);
+      const joinedRoom = result.room;
+      setRoomId(cleanRoomId);
+      setRoomState(joinedRoom || null);
+      setIsInRoom(true);
+      setJoinError(null);
+      addRoomToHistory(cleanRoomId);
+
+      window.history.pushState({}, "", `/room/${cleanRoomId}`);
+
+      setupBroadcastChannel(cleanRoomId);
+      connectRoomWebSocket(cleanRoomId);
+    } catch (err: any) {
+      console.error(`[JOIN_ERROR] Error connecting to room #${cleanRoomId}:`, err);
+      setIsInRoom(false);
+      setRoomState(null);
+      setJoinError({
+        roomId: cleanRoomId,
+        message: err.message || `Ошибка подключения к комнате #${cleanRoomId}`,
+        notFound: false,
+      });
+    } finally {
+      setIsJoiningRoom(false);
+    }
+  };
+
   const handleExitRoom = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "exit_room" }));
@@ -1009,7 +1067,7 @@ export function App() {
 
       if (targetRoomId) {
         setRoomId(targetRoomId);
-        handleJoinOrCreateRoom(targetRoomId);
+        handleJoinRoom(targetRoomId);
       }
     };
 
@@ -1520,6 +1578,37 @@ export function App() {
         </AnimatePresence>
       </div>
 
+      {joinError && !isInRoom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="bg-zinc-900 border border-rose-500/40 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/30 text-rose-400 flex items-center justify-center font-bold text-lg shrink-0">
+                ⚠️
+              </div>
+              <div>
+                <h3 className="font-bold text-white text-base">Комната не найдена</h3>
+                <p className="text-xs text-zinc-400">Код зала: <span className="font-mono text-zinc-200 uppercase font-bold">{joinError.roomId}</span></p>
+              </div>
+            </div>
+            <p className="text-sm text-zinc-300 leading-relaxed bg-zinc-950/70 p-3 rounded-xl border border-zinc-800/80">
+              {joinError.message || "Зал с таким кодом не существует в базе данных или был удалён создателем."}
+            </p>
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setJoinError(null);
+                  window.history.pushState({}, "", "/");
+                }}
+                className="flex-1 px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-semibold rounded-xl transition-all cursor-pointer"
+              >
+                В лобби
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {!isInRoom ? (
         <Lobby
           rooms={lobbyRooms}
@@ -1530,7 +1619,7 @@ export function App() {
           currentUserColor={userColor}
           isGuest={currentUser.isGuest}
           authProvider={currentUser.authProvider}
-          onJoinRoom={handleJoinOrCreateRoom}
+          onJoinRoom={handleJoinRoom}
           onCreateRoom={handleCreateRoom}
           onDeleteRoom={handleDeleteRoom}
           onClearRecentRooms={handleClearHistory}
@@ -2023,7 +2112,7 @@ export function App() {
         onSaveProfile={handleSaveProfile}
         onJoinRoomFromHistory={(targetRoom: string) => {
           setIsProfileModalOpen(false);
-          handleJoinOrCreateRoom(targetRoom);
+          handleJoinRoom(targetRoom);
         }}
         onClearHistory={handleClearHistory}
       />

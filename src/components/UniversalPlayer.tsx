@@ -273,10 +273,29 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
     }
   }, [playing, currentTime, provider, isHost, internalTime, sendIframeCommand]);
 
-  // 4. Listen for iframe postMessage events (VK, YouTube, Rutube, Dzen)
+  // 4. Listen for iframe postMessage events (VK, YouTube, Rutube, Dzen) with origin verification
   useEffect(() => {
+    const ALLOWED_ORIGIN_PATTERNS = [
+      /https:\/\/(www\.)?youtube\.com/,
+      /https:\/\/(www\.)?youtube-nocookie\.com/,
+      /https:\/\/(www\.)?vk\.com/,
+      /https:\/\/(www\.)?rutube\.ru/,
+      /https:\/\/(www\.)?dzen\.ru/,
+      /https:\/\/(www\.)?ok\.ru/,
+      /https:\/\/yastatic\.net/,
+    ];
+
+    const isAllowedOrigin = (origin: string) => {
+      if (!origin || origin === 'null' || origin === window.location.origin) return true;
+      return ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(origin));
+    };
+
     const handleWindowMessage = (event: MessageEvent) => {
       try {
+        if (event.origin && !isAllowedOrigin(event.origin)) {
+          return;
+        }
+
         let data = event.data;
         if (typeof data === 'string') {
           try {

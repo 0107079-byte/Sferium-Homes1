@@ -3,14 +3,15 @@
  * Provides comprehensive Room lifecycle management:
  * - List active public/private rooms
  * - Create new room with custom metadata (name, tags, privacy, password, video)
+ * - Explicit Join room with PostgreSQL validation and Source of Truth
  * - Delete room with host authority
  * - Verify private room passcodes
  * - Broadcast updates to lobby subscribers
  */
 
 import { WebSocket } from 'ws';
-import { RoomState, RoomSummary, CreateRoomPayload, VideoProvider } from '../../src/types';
-import { loadRoomFromDb, saveRoomToDb, deleteRoomFromDb, getAllRoomsFromDb } from '../../src/db';
+import { RoomState, RoomSummary, CreateRoomPayload, VideoProvider, Member } from '../../src/types';
+import { loadRoomFromDb, saveRoomToDb, deleteRoomFromDb, getAllRoomsFromDb, addMemberToDb, normalizeRoomCode } from '../../src/db';
 import { rooms, clientConnections } from './sync';
 export { rooms };
 
@@ -160,6 +161,7 @@ export async function seedInitialRoomsIfEmpty(): Promise<void> {
 
 /**
  * List all active rooms with optional search / filter
+ * Note: Never deletes empty rooms automatically on list!
  */
 export async function listRooms(options?: {
   includePrivate?: boolean;
@@ -167,32 +169,15 @@ export async function listRooms(options?: {
   search?: string;
   hostId?: string;
 }): Promise<RoomSummary[]> {
-  // Sync db rooms to in-memory map while pruning any 0-member abandoned rooms
   try {
     const dbRooms = await getAllRoomsFromDb();
     for (const [id, r] of Object.entries(dbRooms)) {
-      const memberCount = r.members ? Object.keys(r.members).length : 0;
-      if (memberCount > 0) {
-        if (!rooms[id]) {
-          rooms[id] = r;
-        }
-      } else {
-        // Automatically prune empty room from DB and memory
-        delete rooms[id];
-        await deleteRoomFromDb(id);
+      if (!rooms[id]) {
+        rooms[id] = r;
       }
     }
   } catch (err) {
-    console.warn('[ROOMS] Error checking db rooms:', err);
-  }
-
-  // Filter out any in-memory rooms that have 0 members
-  for (const [id, r] of Object.entries(rooms)) {
-    const memberCount = r.members ? Object.keys(r.members).length : 0;
-    if (memberCount === 0) {
-      delete rooms[id];
-      deleteRoomFromDb(id).catch(() => {});
-    }
+    console.warn('[ROOMS] Error loading db rooms for list:', err);
   }
 
   let allList = Object.values(rooms).map(toRoomSummary);
@@ -233,14 +218,36 @@ export async function listRooms(options?: {
 }
 
 /**
- * Create a new Room and persist to memory + DB
+ * Find room by ID or Code from memory or PostgreSQL
+ */
+export async function getRoomByIdOrCode(identifier: string): Promise<RoomState | null> {
+  const cleanId = normalizeRoomCode(identifier);
+  if (!cleanId) return null;
+
+  if (rooms[cleanId]) {
+    return rooms[cleanId];
+  }
+
+  const dbRoom = await loadRoomFromDb(cleanId);
+  if (dbRoom) {
+    rooms[dbRoom.roomId] = dbRoom;
+    return dbRoom;
+  }
+
+  return null;
+}
+
+/**
+ * Explicit Room Creation
+ * Persists to PostgreSQL and In-Memory registry
  */
 export async function createRoom(payload: CreateRoomPayload): Promise<RoomState> {
-  let roomId = payload.roomId ? payload.roomId.trim().toUpperCase() : generateRoomCode();
-  roomId = roomId.replace(/[^A-Z0-9_-]/gi, '').toUpperCase();
+  let roomId = payload.roomId ? normalizeRoomCode(payload.roomId) : generateRoomCode();
   if (!roomId || roomId.length < 2) {
     roomId = generateRoomCode();
   }
+
+  console.log(`[ROOM_CREATE] Creating new room #${roomId} by hostId=${payload.hostId} (${payload.hostName})`);
 
   const cleanUrl = (payload.initialVideoUrl || 'https://www.youtube.com/watch?v=jfKfPfyJRdk').trim();
   let provider: VideoProvider = 'unknown';
@@ -266,8 +273,8 @@ export async function createRoom(payload: CreateRoomPayload): Promise<RoomState>
     videoUrl: cleanUrl,
     provider,
     currentTime: 0,
-    playing: true,
-    isPlaying: true,
+    playing: false,
+    isPlaying: false,
     lastUpdated: Date.now(),
     members: {
       [payload.hostId]: {
@@ -295,6 +302,7 @@ export async function createRoom(payload: CreateRoomPayload): Promise<RoomState>
   rooms[roomId] = newRoom;
   await saveRoomToDb(newRoom);
 
+  console.log(`[ROOM_CREATE_SUCCESS] Room #${roomId} saved to PostgreSQL and memory.`);
   // Notify all lobby clients
   broadcastLobbyUpdate();
 
@@ -302,11 +310,124 @@ export async function createRoom(payload: CreateRoomPayload): Promise<RoomState>
 }
 
 /**
+ * Explicit Room Join with PostgreSQL verification
+ * NEVER creates a room if it does not exist!
+ */
+export async function joinRoomBackend(params: {
+  roomId: string;
+  userId: string;
+  name: string;
+  avatar?: string;
+  color?: string;
+  password?: string;
+}): Promise<{
+  success: boolean;
+  status: number;
+  room?: RoomState;
+  member?: Member;
+  error?: string;
+  code?: string;
+}> {
+  const cleanId = normalizeRoomCode(params.roomId);
+  console.log(`[ROOM_JOIN_REQUEST] User ${params.userId} (${params.name}) requesting join to room #${cleanId}`);
+
+  if (!cleanId) {
+    return {
+      success: false,
+      status: 400,
+      error: 'Некорректный код комнаты',
+      code: 'INVALID_ROOM_CODE',
+    };
+  }
+
+  // Authoritative lookup in PostgreSQL and memory
+  const room = await getRoomByIdOrCode(cleanId);
+  if (!room) {
+    console.log(`[ROOM_NOT_FOUND] Join rejected: Room "${cleanId}" does not exist in PostgreSQL or memory.`);
+    return {
+      success: false,
+      status: 404,
+      error: `Комната #${cleanId} не найдена. Проверьте правильность кода или ссылки.`,
+      code: 'ROOM_NOT_FOUND',
+    };
+  }
+
+  // Check ban list
+  if (room.bannedUserIds?.includes(params.userId)) {
+    return {
+      success: false,
+      status: 403,
+      error: 'Вы заблокированы в этой комнате.',
+      code: 'USER_BANNED',
+    };
+  }
+
+  // Check private room password
+  if (room.isPrivate && room.password && room.password.length > 0) {
+    const isHost = room.hostId === params.userId;
+    if (!isHost) {
+      if (!params.password || params.password.trim() !== room.password) {
+        return {
+          success: false,
+          status: 401,
+          error: 'Требуется пароль для входа в приватную комнату.',
+          code: 'PASSWORD_REQUIRED',
+        };
+      }
+    }
+  }
+
+  // Check room capacity
+  const currentMemberCount = Object.keys(room.members || {}).length;
+  const isAlreadyMember = Boolean(room.members?.[params.userId]);
+  if (!isAlreadyMember && room.maxMembers && currentMemberCount >= room.maxMembers) {
+    return {
+      success: false,
+      status: 403,
+      error: `В комнате достигнут лимит участников (${room.maxMembers}).`,
+      code: 'ROOM_FULL',
+    };
+  }
+
+  // Determine role & host status
+  const isHost = room.hostId === params.userId;
+  const existingRole = room.members?.[params.userId]?.role;
+  const role = isHost ? 'host' : (existingRole || room.defaultRole || 'member');
+
+  const joinedMember: Member = {
+    userId: params.userId,
+    name: params.name || 'Гость',
+    avatar: params.avatar || '🍿',
+    color: params.color || '#a855f7',
+    isHost,
+    role,
+  };
+
+  room.members = room.members || {};
+  room.members[params.userId] = joinedMember;
+
+  // Persist updated membership to PostgreSQL
+  await addMemberToDb(cleanId, joinedMember);
+  await saveRoomToDb(room);
+
+  console.log(`[ROOM_JOIN_SUCCESS] User ${params.userId} successfully joined room #${cleanId} as ${role} (isHost=${isHost})`);
+
+  broadcastLobbyUpdate();
+
+  return {
+    success: true,
+    status: 200,
+    room,
+    member: joinedMember,
+  };
+}
+
+/**
  * Delete a room by host
  */
 export async function deleteRoom(roomId: string, requesterUserId?: string): Promise<{ success: boolean; error?: string }> {
-  const cleanId = roomId.toUpperCase();
-  const room = rooms[cleanId] || (await loadRoomFromDb(cleanId));
+  const cleanId = normalizeRoomCode(roomId);
+  const room = await getRoomByIdOrCode(cleanId);
 
   if (!room) {
     return { success: false, error: 'Комната не найдена' };
@@ -353,7 +474,7 @@ export async function deleteRoom(roomId: string, requesterUserId?: string): Prom
  * Verify passcode for private rooms
  */
 export function verifyRoomPassword(roomId: string, passwordAttempt: string): boolean {
-  const cleanId = roomId.toUpperCase();
+  const cleanId = normalizeRoomCode(roomId);
   const room = rooms[cleanId];
   if (!room || !room.isPrivate || !room.password) {
     return true; // No password required

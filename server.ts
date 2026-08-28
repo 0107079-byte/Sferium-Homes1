@@ -709,8 +709,18 @@ function updateRoomCurrentTime(roomId: string) {
   }
 }
 
-function getAndUpdateRoomTime(room: any) {
-  return room ? room.currentTime : 0;
+function getAndUpdateRoomTime(room: any): number {
+  if (!room) return 0;
+  const now = Date.now();
+  if (room.playing || room.isPlaying) {
+    const elapsedSeconds = Math.max(0, (now - (room.lastUpdated || now)) / 1000);
+    const rate = room.playbackRate || room.rate || 1.0;
+    const newPos = (room.currentTime || 0) + elapsedSeconds * rate;
+    const duration = room.duration || 0;
+    room.currentTime = duration > 0 ? Math.min(newPos, duration) : newPos;
+  }
+  room.lastUpdated = now;
+  return room.currentTime || 0;
 }
 
 function addSystemMessage(room: RoomState, text: string, prefix: string, userId?: string) {
@@ -797,93 +807,78 @@ wss.on("connection", async (ws: WebSocket, req) => {
       console.warn("[LOBBY] Failed to send initial room list:", e);
     }
   } else {
-    if (!rooms[roomId]) {
+    // Normalize room identifier
+    const cleanRoomId = (roomId || "").trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+
+    let room = rooms[cleanRoomId];
+    if (!room) {
       try {
-        const dbRoom = await loadRoomFromDb(roomId);
+        console.log(`[WEBSOCKET_LOOKUP] Querying DB for room #${cleanRoomId} for connecting client ${userId}`);
+        const dbRoom = await loadRoomFromDb(cleanRoomId);
         if (dbRoom) {
-          rooms[roomId] = dbRoom;
-          rooms[roomId].members = rooms[roomId].members || {};
-          console.log(`[DB RESTORE] Loaded room #${roomId} from persistent DB.`);
+          rooms[cleanRoomId] = dbRoom;
+          rooms[cleanRoomId].members = rooms[cleanRoomId].members || {};
+          room = rooms[cleanRoomId];
+          console.log(`[WEBSOCKET_ROOM_FOUND] Loaded room #${cleanRoomId} from persistent DB.`);
         }
       } catch (e) {
-        console.warn(`[DB RESTORE ERROR] Could not load room #${roomId}:`, e);
+        console.warn(`[DB RESTORE ERROR] Could not load room #${cleanRoomId}:`, e);
       }
     }
 
-    if (!rooms[roomId]) {
-      rooms[roomId] = {
-        roomId,
-        hostId: userId,
-        videoUrl: "https://www.youtube.com/watch?v=jfKfPfyJRdk",
-        videoId: "jfKfPfyJRdk",
-        provider: "youtube",
-        playing: false,
-        isPlaying: false,
-        currentTime: 0.0,
-        lastUpdated: Date.now(),
-        anyoneCanControl: false,
-        members: {},
-        chatHistory: [
-          {
-            id: `sys_init_${Date.now()}`,
-            type: "system",
-            text: `🍿 Зал Sferium Homes #${roomId} был успешно открыт.`,
-            timestamp: Date.now(),
-          }
-        ],
-      };
-
-      if (isMediasoupSupported()) {
-        createSFURoom(roomId).catch((err) => {
-          console.error(`[SFU] Failed to create SFU Room #${roomId}:`, err.message);
-        });
-      }
+    if (!room) {
+      console.log(`[WEBSOCKET_ROOM_NOT_FOUND] Client ${userId} (${name}) tried to connect to non-existent room #${cleanRoomId}. Rejecting.`);
+      ws.send(JSON.stringify({
+        type: "error",
+        error: "ROOM_NOT_FOUND",
+        code: "ROOM_NOT_FOUND",
+        message: `Комната #${cleanRoomId} не найдена в базе данных.`
+      }));
+      ws.close(4004, "Room Not Found");
+      return;
     }
 
-    const room = rooms[roomId];
     getAndUpdateRoomTime(room);
 
     // Check if banned
     if (room.bannedUserIds?.includes(userId)) {
-      console.warn(`[BAN REJECT] User ${userId} is banned from room #${roomId}`);
+      console.warn(`[BAN REJECT] User ${userId} is banned from room #${cleanRoomId}`);
       ws.send(JSON.stringify({
         type: "error",
+        error: "USER_BANNED",
         message: "Вы заблокированы в этом зале"
       }));
-      ws.close();
+      ws.close(4003, "User Banned");
       return;
     }
 
-    const isFirstMember = Object.keys(room.members).length === 0;
-    const isExisting = !!room.members[userId];
-    const originalHostStatus = isExisting ? room.members[userId].isHost : isFirstMember;
-
-    if (originalHostStatus) {
-      room.hostId = userId;
-    }
-
-    const existingRole = room.members[userId]?.role;
-    const userRole: UserRole = originalHostStatus ? 'host' : (existingRole || room.defaultRole || 'member');
+    // Host status is strictly determined by room.hostId or existing member record
+    const isHost = room.hostId === userId || Boolean(room.members?.[userId]?.isHost);
+    const existingRole = room.members?.[userId]?.role;
+    const userRole: UserRole = isHost ? 'host' : (existingRole || room.defaultRole || 'member');
 
     const joinedMember: Member = {
       userId,
       name,
       avatar,
       color,
-      isHost: originalHostStatus,
+      isHost,
       role: userRole,
     };
 
+    room.members = room.members || {};
     room.members[userId] = joinedMember;
 
+    updateRoomCurrentTime(cleanRoomId);
     addSystemMessage(room, `👋 ${avatar} ${name} присоединился к залу.`, "join", userId);
 
-    broadcastToRoom(roomId, {
+    broadcastToRoom(cleanRoomId, {
       type: "room_state",
-      state: room,
+      state: { ...room, serverTime: Date.now() },
     });
 
     saveRoomToDb(room);
+    addMemberToDb(cleanRoomId, joinedMember);
     broadcastLobbyUpdate();
   }
 
@@ -1178,6 +1173,9 @@ wss.on("connection", async (ws: WebSocket, req) => {
           const playRate = typeof msg.rate === "number" ? msg.rate : 1.0;
           const playUpdatedAt = msg.updatedAt || Date.now();
           currentRoom.lastUpdated = playUpdatedAt;
+          currentRoom.revision = (currentRoom.revision || 0) + 1;
+          const currentRev = currentRoom.revision;
+          const nowServerTime = Date.now();
 
           addSystemMessage(currentRoom, `▶ ${member.avatar} ${member.name} включил воспроизведение.`, "play", conn.userId);
 
@@ -1188,6 +1186,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             playing: true,
             rate: playRate,
             updatedAt: playUpdatedAt,
+            serverTime: nowServerTime,
+            revision: currentRev,
             senderId: conn.userId,
           });
 
@@ -1196,6 +1196,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             roomId: conn.roomId,
             currentTime: currentRoom.currentTime,
             time: currentRoom.currentTime,
+            serverTime: nowServerTime,
+            revision: currentRev,
             senderId: conn.userId,
           });
 
@@ -1203,12 +1205,14 @@ wss.on("connection", async (ws: WebSocket, req) => {
             type: "playback_change",
             playing: true,
             currentTime: currentRoom.currentTime,
+            serverTime: nowServerTime,
+            revision: currentRev,
             senderId: conn.userId,
           });
 
           broadcastToRoom(conn.roomId, {
             type: "room_state",
-            state: currentRoom,
+            state: { ...currentRoom, serverTime: nowServerTime },
           });
 
           saveRoomToDb(currentRoom);
@@ -1230,6 +1234,9 @@ wss.on("connection", async (ws: WebSocket, req) => {
           const pauseRate = typeof msg.rate === "number" ? msg.rate : 1.0;
           const pauseUpdatedAt = msg.updatedAt || Date.now();
           currentRoom.lastUpdated = pauseUpdatedAt;
+          currentRoom.revision = (currentRoom.revision || 0) + 1;
+          const currentRev = currentRoom.revision;
+          const nowServerTime = Date.now();
 
           addSystemMessage(currentRoom, `⏸ ${member.avatar} ${member.name} поставил на паузу.`, "pause", conn.userId);
 
@@ -1240,6 +1247,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             playing: false,
             rate: pauseRate,
             updatedAt: pauseUpdatedAt,
+            serverTime: nowServerTime,
+            revision: currentRev,
             senderId: conn.userId,
           });
 
@@ -1248,6 +1257,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             roomId: conn.roomId,
             currentTime: currentRoom.currentTime,
             time: currentRoom.currentTime,
+            serverTime: nowServerTime,
+            revision: currentRev,
             senderId: conn.userId,
           });
 
@@ -1255,12 +1266,14 @@ wss.on("connection", async (ws: WebSocket, req) => {
             type: "playback_change",
             playing: false,
             currentTime: currentRoom.currentTime,
+            serverTime: nowServerTime,
+            revision: currentRev,
             senderId: conn.userId,
           });
 
           broadcastToRoom(conn.roomId, {
             type: "room_state",
-            state: currentRoom,
+            state: { ...currentRoom, serverTime: nowServerTime },
           });
 
           saveRoomToDb(currentRoom);
@@ -1274,6 +1287,9 @@ wss.on("connection", async (ws: WebSocket, req) => {
             currentRoom.currentTime = parseFloat(msg.currentTime);
           }
           currentRoom.lastUpdated = Date.now();
+          currentRoom.revision = (currentRoom.revision || 0) + 1;
+          const forceRev = currentRoom.revision;
+          const forceServerTime = Date.now();
           const masterTime = currentRoom.currentTime;
 
           currentRoom.chatHistory = currentRoom.chatHistory.filter(
@@ -1285,11 +1301,13 @@ wss.on("connection", async (ws: WebSocket, req) => {
           broadcastToRoom(conn.roomId, {
             type: "apply_force_sync",
             currentTime: masterTime,
+            serverTime: forceServerTime,
+            revision: forceRev,
           });
 
           broadcastToRoom(conn.roomId, {
             type: "room_state",
-            state: currentRoom,
+            state: { ...currentRoom, serverTime: forceServerTime },
           });
 
           saveRoomToDb(currentRoom);
@@ -1307,6 +1325,9 @@ wss.on("connection", async (ws: WebSocket, req) => {
             currentRoom.currentTime = parseFloat(msg.time);
           }
           currentRoom.lastUpdated = Date.now();
+          currentRoom.revision = (currentRoom.revision || 0) + 1;
+          const playerStateRev = currentRoom.revision;
+          const playerStateServerTime = Date.now();
 
           addSystemMessage(
             currentRoom,
@@ -1325,6 +1346,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             state: currentRoom.playing ? 'playing' : 'paused',
             currentTime: currentRoom.currentTime,
             time: currentRoom.currentTime,
+            serverTime: playerStateServerTime,
+            revision: playerStateRev,
             senderId: conn.userId,
           });
 
@@ -1332,12 +1355,14 @@ wss.on("connection", async (ws: WebSocket, req) => {
             type: "playback_change",
             playing: currentRoom.playing,
             currentTime: currentRoom.currentTime,
+            serverTime: playerStateServerTime,
+            revision: playerStateRev,
             senderId: conn.userId,
           });
 
           broadcastToRoom(conn.roomId, {
             type: "room_state",
-            state: currentRoom,
+            state: { ...currentRoom, serverTime: playerStateServerTime },
           });
 
           saveRoomToDb(currentRoom);
@@ -1361,6 +1386,9 @@ wss.on("connection", async (ws: WebSocket, req) => {
           const seekRate = typeof msg.rate === "number" ? msg.rate : 1.0;
           const seekUpdatedAt = msg.updatedAt || Date.now();
           currentRoom.lastUpdated = seekUpdatedAt;
+          currentRoom.revision = (currentRoom.revision || 0) + 1;
+          const seekRev = currentRoom.revision;
+          const seekServerTime = Date.now();
 
           addSystemMessage(currentRoom, `⏩ ${member.avatar} ${member.name} перемотал эфир.`, "seek", conn.userId);
 
@@ -1372,6 +1400,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             playing: currentRoom.playing,
             rate: seekRate,
             updatedAt: seekUpdatedAt,
+            serverTime: seekServerTime,
+            revision: seekRev,
             senderId: conn.userId,
           });
 
@@ -1380,6 +1410,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             currentTime: currentRoom.currentTime,
             time: currentRoom.currentTime,
             playing: currentRoom.playing,
+            serverTime: seekServerTime,
+            revision: seekRev,
             senderId: conn.userId,
           });
 
@@ -1389,6 +1421,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             time: currentRoom.currentTime,
             currentTime: currentRoom.currentTime,
             payload: { time: currentRoom.currentTime },
+            serverTime: seekServerTime,
+            revision: seekRev,
             senderId: conn.userId,
           });
 
@@ -1396,12 +1430,14 @@ wss.on("connection", async (ws: WebSocket, req) => {
             type: "playback_change",
             playing: currentRoom.playing,
             currentTime: currentRoom.currentTime,
+            serverTime: seekServerTime,
+            revision: seekRev,
             senderId: conn.userId,
           });
 
           broadcastToRoom(conn.roomId, {
             type: "room_state",
-            state: currentRoom,
+            state: { ...currentRoom, serverTime: seekServerTime },
           });
 
           saveRoomToDb(currentRoom);
@@ -1463,6 +1499,9 @@ wss.on("connection", async (ws: WebSocket, req) => {
           const now = typeof msg.updatedAt === "number" ? msg.updatedAt : Date.now();
           currentRoom.lastUpdated = now;
           currentRoom.lastHeartbeatSyncTime = now;
+          currentRoom.revision = (currentRoom.revision || 0) + 1;
+          const syncRev = currentRoom.revision;
+          const syncServerTime = Date.now();
 
           // 0. Primary video:sync broadcast for sub-second sync plugins
           broadcastToRoom(conn.roomId, {
@@ -1472,6 +1511,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             playing: currentRoom.playing,
             rate: rate,
             updatedAt: now,
+            serverTime: syncServerTime,
+            revision: syncRev,
             senderId: conn.userId,
           });
 
@@ -1489,6 +1530,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
               rate: rate,
               ts: now,
             },
+            serverTime: syncServerTime,
+            revision: syncRev,
             senderId: conn.userId,
           });
 
@@ -1505,6 +1548,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             isPlaying: currentRoom.isPlaying,
             rate: rate,
             updatedAt: now,
+            serverTime: syncServerTime,
+            revision: syncRev,
             senderId: conn.userId,
           });
 
@@ -1517,6 +1562,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             isPlaying: currentRoom.isPlaying,
             state: currentRoom.playing ? 'playing' : 'paused',
             playbackRate: msg.playbackRate || 1,
+            serverTime: syncServerTime,
+            revision: syncRev,
             senderId: conn.userId,
           });
 
@@ -1525,6 +1572,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             currentTime: currentRoom.currentTime,
             playing: currentRoom.playing,
             isPlaying: currentRoom.isPlaying,
+            serverTime: syncServerTime,
+            revision: syncRev,
             senderId: conn.userId,
           });
           break;
@@ -2837,7 +2886,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
   });
 });
 
-function handleCleanLeave(ws: WebSocket) {
+async function handleCleanLeave(ws: WebSocket) {
   unregisterLobbySubscriber(ws);
   const conn = clientConnections.get(ws);
   if (!conn) return;
@@ -2871,72 +2920,43 @@ function handleCleanLeave(ws: WebSocket) {
   addSystemMessage(room, `🚪 ${leavingMember.avatar} ${leavingMember.name} покинул кинозал.`, "leave", conn.userId);
 
   delete room.members[conn.userId];
+  await removeMemberFromDb(conn.roomId, conn.userId);
+  await saveRoomToDb(room);
   broadcastLobbyUpdate();
 
   const activeMembersList = Object.values(room.members || {});
-  const activeWsCount = Array.from(clientConnections.values()).filter((c) => c.roomId === conn.roomId).length;
 
-  if (activeMembersList.length === 0 || activeWsCount === 0) {
-    console.log(`[AUTO-DELETE ROOM] Room #${conn.roomId} has 0 participants left. Purging immediately from memory and database.`);
-    
-    // Broadcast room_closed event so all client instances clean their view
-    broadcastToRoom(conn.roomId, {
-      type: "room_closed",
-      roomId: conn.roomId,
-      reason: "Все участники покинули комнату. Комната закрыта.",
-      message: "Все участники покинули комнату. Комната закрыта.",
-    });
-
-    broadcastToRoom(conn.roomId, {
-      type: "room:closed",
-      roomId: conn.roomId,
-      reason: "Все участники покинули комнату. Комната закрыта.",
-    });
-
-    delete rooms[conn.roomId];
-    try {
-      deleteRoomFromDb(conn.roomId);
-    } catch (e) {
-      console.warn("[AUTO-DELETE ROOM] Error deleting room from DB:", e);
+  if (leavingMember.isHost || room.hostId === conn.userId) {
+    if (activeMembersList.length > 0) {
+      const randomIndex = Math.floor(Math.random() * activeMembersList.length);
+      const hostMember = activeMembersList[randomIndex] as Member;
+      hostMember.isHost = true;
+      hostMember.role = "host";
+      room.hostId = hostMember.userId;
+      room.hostName = hostMember.name;
+      room.hostAvatar = hostMember.avatar;
+      addSystemMessage(
+        room,
+        `👑 Создатель покинул кинозал. Пульт управления передан ${hostMember.avatar} ${hostMember.name}.`,
+        "host",
+        hostMember.userId
+      );
+      broadcastToRoom(conn.roomId, {
+        type: "room:newHost",
+        newHostId: hostMember.userId,
+        newHostName: hostMember.name,
+        newHostAvatar: hostMember.avatar,
+      });
     }
-    broadcastLobbyUpdate();
-    if (isMediasoupSupported()) {
-      stopStreamSession(conn.roomId);
-      deleteSFURoom(conn.roomId);
-    }
-  } else {
-    if (leavingMember.isHost || room.hostId === conn.userId) {
-      if (activeMembersList.length > 0) {
-        const randomIndex = Math.floor(Math.random() * activeMembersList.length);
-        const hostMember = activeMembersList[randomIndex] as Member;
-        hostMember.isHost = true;
-        hostMember.role = "host";
-        room.hostId = hostMember.userId;
-        room.hostName = hostMember.name;
-        room.hostAvatar = hostMember.avatar;
-        addSystemMessage(
-          room,
-          `👑 Создатель покинул кинозал. Пульт управления передан случайному участнику ${hostMember.avatar} ${hostMember.name}.`,
-          "host",
-          hostMember.userId
-        );
-        broadcastToRoom(conn.roomId, {
-          type: "room:newHost",
-          newHostId: hostMember.userId,
-          newHostName: hostMember.name,
-          newHostAvatar: hostMember.avatar,
-        });
-      }
-    }
-
-    broadcastToRoom(conn.roomId, {
-      type: "room_state",
-      state: room,
-    });
-
-    broadcastParticipantsUpdate(conn.roomId);
-    saveRoomToDb(room);
   }
+
+  broadcastToRoom(conn.roomId, {
+    type: "room_state",
+    state: room,
+  });
+
+  broadcastParticipantsUpdate(conn.roomId);
+  saveRoomToDb(room);
 }
 
 server.on("upgrade", (req, socket, head) => {
@@ -2955,14 +2975,8 @@ async function startFullStackServer() {
     const storedRooms = await getAllRoomsFromDb();
     let restoredCount = 0;
     for (const [id, r] of Object.entries(storedRooms)) {
-      const memberCount = r.members ? Object.keys(r.members).length : 0;
-      if (memberCount > 0) {
-        rooms[id] = r;
-        restoredCount++;
-      } else {
-        // Prune empty rooms from database on server startup
-        await deleteRoomFromDb(id);
-      }
+      rooms[id] = r;
+      restoredCount++;
     }
     console.log(`[DB] Successfully restored ${restoredCount} active room(s) from persistent database.`);
     await seedInitialRoomsIfEmpty();

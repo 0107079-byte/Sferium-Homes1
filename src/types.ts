@@ -195,6 +195,9 @@ export interface RoomState {
   isLocked?: boolean;
   mediaType?: 'vod' | 'live';
   playbackRate?: number;
+  revision?: number;
+  serverTime?: number;
+  duration?: number;
   members: Record<string, Member>;
   chatHistory: ChatMessage[];
   anyoneCanControl?: boolean;

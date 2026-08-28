@@ -163,16 +163,11 @@ export function sendToUserInRoom(roomId: string, targetUserId: string, message: 
 }
 
 /**
- * Initializes or loads room from database
+ * Loads room from memory or database (NEVER creates a new room)
  */
-export async function getOrCreateRoom(
-  roomId: string,
-  hostUserId: string,
-  hostName = 'Киноман',
-  hostAvatar = '🍿',
-  hostColor = '#a855f7'
-): Promise<RoomState> {
-  const cleanId = roomId.toUpperCase();
+export async function getExistingRoom(roomId: string): Promise<RoomState | null> {
+  const cleanId = roomId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+  if (!cleanId) return null;
 
   if (rooms[cleanId]) {
     return rooms[cleanId];
@@ -192,41 +187,5 @@ export async function getOrCreateRoom(
     console.warn(`[DB Load Error] Room #${cleanId}:`, e);
   }
 
-  // Create new room
-  const newRoom: RoomState = {
-    roomId: cleanId,
-    hostId: hostUserId,
-    videoUrl: 'https://www.youtube.com/watch?v=jfKfPfyJRdk',
-    provider: 'youtube',
-    videoId: 'jfKfPfyJRdk',
-    currentTime: 0,
-    playing: false,
-    isPlaying: false,
-    lastUpdated: Date.now(),
-    anyoneCanControl: true,
-    bannedUserIds: [],
-    defaultRole: 'member',
-    members: {
-      [hostUserId]: {
-        userId: hostUserId,
-        name: hostName,
-        avatar: hostAvatar,
-        color: hostColor,
-        isHost: true,
-        role: 'host',
-      },
-    },
-    chatHistory: [
-      {
-        id: `sys-${Date.now()}`,
-        type: 'system',
-        text: `🍿 Зал Sferium Homes #${cleanId} готов к совместному просмотру!`,
-        timestamp: Date.now(),
-      },
-    ],
-  };
-
-  rooms[cleanId] = newRoom;
-  saveRoomToDb(newRoom);
-  return newRoom;
+  return null;
 }

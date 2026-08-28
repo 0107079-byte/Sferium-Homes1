@@ -1,4 +1,4 @@
-import { RoomSummary, CreateRoomPayload } from '../types';
+import { RoomSummary, CreateRoomPayload, RoomState, Member } from '../types';
 
 export interface GetRoomsOptions {
   tag?: string;
@@ -31,9 +31,97 @@ export async function fetchRoomsApi(options?: GetRoomsOptions): Promise<RoomSumm
 }
 
 /**
- * Create a new room via REST API
+ * Fetch a single room info by ID or Code
  */
-export async function createRoomApi(payload: CreateRoomPayload): Promise<{ success: boolean; room?: any; roomId?: string; error?: string }> {
+export async function fetchRoomByIdApi(roomId: string): Promise<{ success: boolean; room?: any; error?: string; notFound?: boolean }> {
+  try {
+    const cleanId = roomId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+    const res = await fetch(`/api/rooms/${encodeURIComponent(cleanId)}`);
+    const data = await res.json();
+
+    if (res.status === 404) {
+      return { success: false, notFound: true, error: data.message || `Комната #${cleanId} не найдена` };
+    }
+
+    if (!res.ok || !data.success) {
+      return { success: false, error: data.error || 'Ошибка получения информации о комнате' };
+    }
+
+    return { success: true, room: data.room };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'Сетевая ошибка' };
+  }
+}
+
+/**
+ * Explicitly join room via REST API with PostgreSQL validation
+ * NEVER creates a room if it does not exist!
+ */
+export async function joinRoomApi(
+  roomId: string,
+  userPayload: {
+    userId: string;
+    name: string;
+    avatar?: string;
+    color?: string;
+    password?: string;
+  }
+): Promise<{
+  success: boolean;
+  room?: RoomState;
+  member?: Member;
+  roomId?: string;
+  error?: string;
+  code?: string;
+  notFound?: boolean;
+}> {
+  try {
+    const cleanId = roomId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+    const res = await fetch(`/api/rooms/${encodeURIComponent(cleanId)}/join`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(userPayload),
+    });
+
+    const data = await res.json();
+
+    if (res.status === 404 || data.code === 'ROOM_NOT_FOUND') {
+      return {
+        success: false,
+        notFound: true,
+        code: 'ROOM_NOT_FOUND',
+        error: data.error || `Комната #${cleanId} не найдена. Проверьте ссылку или код.`,
+      };
+    }
+
+    if (!res.ok || !data.success) {
+      return {
+        success: false,
+        code: data.code,
+        error: data.error || 'Не удалось присоединиться к комнате',
+      };
+    }
+
+    return {
+      success: true,
+      room: data.room,
+      member: data.member,
+      roomId: data.roomId || cleanId,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || 'Ошибка соединения с сервером',
+    };
+  }
+}
+
+/**
+ * Create a new room via REST API (EXPLICIT CREATE)
+ */
+export async function createRoomApi(payload: CreateRoomPayload): Promise<{ success: boolean; room?: RoomState; roomId?: string; error?: string }> {
   try {
     const res = await fetch('/api/rooms', {
       method: 'POST',
@@ -58,7 +146,8 @@ export async function createRoomApi(payload: CreateRoomPayload): Promise<{ succe
  */
 export async function deleteRoomApi(roomId: string, userId: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`, {
+    const cleanId = roomId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+    const res = await fetch(`/api/rooms/${encodeURIComponent(cleanId)}`, {
       method: 'DELETE',
       headers: {
         'Content-Type': 'application/json',
@@ -82,7 +171,8 @@ export async function deleteRoomApi(roomId: string, userId: string): Promise<{ s
  */
 export async function verifyRoomPasswordApi(roomId: string, passwordAttempt: string): Promise<boolean> {
   try {
-    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/verify`, {
+    const cleanId = roomId.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+    const res = await fetch(`/api/rooms/${encodeURIComponent(cleanId)}/verify`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
