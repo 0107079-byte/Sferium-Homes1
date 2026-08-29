@@ -5,9 +5,48 @@ import { getPgPool, initPostgresSchema } from "./services/postgres";
 const memoryStore: Record<string, RoomState> = {};
 let dbInitialized = false;
 
-export function normalizeRoomCode(code: string): string {
-  if (!code) return "";
-  return code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+export function normalizeRoomCode(input: string): string {
+  if (!input) return "";
+  let str = input.trim();
+  
+  // 1. Try URL parsing if valid absolute URL
+  try {
+    if (str.startsWith("http://") || str.startsWith("https://")) {
+      const parsedUrl = new URL(str);
+      const queryRoom = parsedUrl.searchParams.get("room") || parsedUrl.searchParams.get("roomId");
+      if (queryRoom) {
+        return queryRoom.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+      }
+      str = parsedUrl.pathname + parsedUrl.search + parsedUrl.hash;
+    }
+  } catch {}
+
+  // 2. Check for query parameter in relative URL or search string
+  if (str.includes("room=") || str.includes("roomId=")) {
+    const match = str.match(/(?:room|roomId)=([^&#]+)/i);
+    if (match && match[1]) {
+      return match[1].trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+    }
+  }
+
+  // 3. Extract room ID from path patterns (/room/XYZ or /invite/XYZ)
+  if (str.includes("/room/")) {
+    str = str.split("/room/").pop() || "";
+  } else if (str.includes("/invite/")) {
+    str = str.split("/invite/").pop() || "";
+  }
+
+  // 4. Strip query parameters and hashes
+  str = str.replace(/[?#].*$/, "");
+  // 5. Strip leading/trailing slashes
+  str = str.replace(/^\/+|\/+$/g, "");
+
+  // 6. Remove any remaining URL slashes or path parts
+  if (str.includes("/")) {
+    str = str.split("/").pop() || "";
+  }
+
+  return str.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
 }
 
 async function ensureDb(): Promise<boolean> {

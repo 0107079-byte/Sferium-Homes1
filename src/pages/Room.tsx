@@ -97,6 +97,7 @@ export const Room: React.FC<RoomProps> = ({
   const [isRoleManagerOpen, setIsRoleManagerOpen] = useState(false);
   const [selectedUserForMenu, setSelectedUserForMenu] = useState<Member | null>(null);
   const [kickedModal, setKickedModal] = useState<{ isOpen: boolean; reason: string; isBan: boolean } | null>(null);
+  const [roomErrorModal, setRoomErrorModal] = useState<{ isOpen: boolean; message: string; notFound: boolean } | null>(null);
   const [modNotice, setModNotice] = useState<string | null>(null);
 
   // Auto-test Suite state
@@ -274,6 +275,16 @@ export const Room: React.FC<RoomProps> = ({
       }
     });
 
+    const unsubError = syncSocket.on('error', (data: any) => {
+      if (data.code === 'ROOM_NOT_FOUND' || data.error === 'ROOM_NOT_FOUND') {
+        setRoomErrorModal({
+          isOpen: true,
+          message: data.message || `Комната #${roomId} не найдена в базе данных.`,
+          notFound: true,
+        });
+      }
+    });
+
     return () => {
       unsubState();
       unsubRoomState();
@@ -282,6 +293,7 @@ export const Room: React.FC<RoomProps> = ({
       unsubKick();
       unsubBan();
       unsubForceMute();
+      unsubError();
       syncSocket.disconnect();
     };
   }, [roomId, currentUser]);
@@ -574,6 +586,44 @@ export const Room: React.FC<RoomProps> = ({
                   }
                 }}
                 className="w-full py-3 bg-gradient-to-r from-rose-600 to-red-600 text-white font-bold text-xs uppercase tracking-wider rounded-2xl transition-all shadow-lg"
+              >
+                Вернуться в лобби
+              </button>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Room Not Found / Join Error Modal */}
+        {roomErrorModal?.isOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/85 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-zinc-900 border border-amber-500/40 rounded-3xl p-6 max-w-md w-full text-center space-y-4 shadow-2xl relative z-10"
+            >
+              <div className="w-14 h-14 rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/40 flex items-center justify-center mx-auto shadow-lg">
+                <AlertTriangle className="w-7 h-7" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-lg font-black text-white">Комната не найдена (404)</h3>
+                <p className="text-xs text-zinc-400">{roomErrorModal.message}</p>
+              </div>
+              <button
+                onClick={() => {
+                  if (onLeaveRoom) {
+                    onLeaveRoom();
+                  } else {
+                    window.location.href = '/';
+                  }
+                }}
+                className="w-full py-3 bg-gradient-to-r from-amber-600 to-yellow-600 text-white font-bold text-xs uppercase tracking-wider rounded-2xl transition-all shadow-lg"
               >
                 Вернуться в лобби
               </button>

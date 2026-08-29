@@ -1,34 +1,46 @@
 import { runRealPipelineIntegrationTests } from './integration/realSyncPipeline.test';
+import { runRoomJoinAuditIntegrationTests } from './integration/roomJoinDatabaseAudit.test';
 
 async function main() {
   console.log('================================================================');
-  console.log('🧪 SFERIUM-HOMES: REAL PRODUCTION SYNC PIPELINE INTEGRATION TESTS');
+  console.log('🧪 SFERIUM-HOMES: REAL PRODUCTION PIPELINE INTEGRATION TESTS');
   console.log('================================================================');
 
   try {
-    const results = await runRealPipelineIntegrationTests();
-    let passedCount = 0;
-    let failedCount = 0;
-
-    for (const res of results) {
+    console.log('\n--- SUITE 1: Video Sync, Latency & Revision Tests ---');
+    const syncResults = await runRealPipelineIntegrationTests();
+    for (const res of syncResults) {
       if (res.passed) {
-        passedCount++;
         console.log(`✅ [PASS] ${res.name}`);
       } else {
-        failedCount++;
         console.log(`❌ [FAIL] ${res.name}`);
       }
       console.log(`   └─ Details: ${res.details}`);
     }
 
-    console.log('\n----------------------------------------------------------------');
-    console.log(`Summary: ${passedCount} PASSED / ${failedCount} FAILED (Total: ${results.length})`);
-    console.log('----------------------------------------------------------------');
+    console.log('\n--- SUITE 2: Room Join / PostgreSQL Source of Truth Invariant Tests ---');
+    const joinAuditResults = await runRoomJoinAuditIntegrationTests();
+    for (const res of joinAuditResults) {
+      if (res.passed) {
+        console.log(`✅ [PASS] ${res.name}`);
+      } else {
+        console.log(`❌ [FAIL] ${res.name}`);
+      }
+      console.log(`   └─ Details: ${res.details}`);
+    }
+
+    const allResults = [...syncResults, ...joinAuditResults];
+    const passedCount = allResults.filter((r) => r.passed).length;
+    const failedCount = allResults.filter((r) => !r.passed).length;
+
+    console.log('\n================================================================');
+    console.log(`Summary: ${passedCount} PASSED / ${failedCount} FAILED (Total: ${allResults.length})`);
+    console.log('================================================================');
 
     if (failedCount > 0) {
       process.exit(1);
     } else {
-      console.log('🎉 ALL REAL PRODUCTION SYNC INTEGRATION TESTS PASSED PERFECTLY.');
+      console.log('🎉 ALL PRODUCTION SYNC & ROOM JOIN AUDIT TESTS PASSED.');
       process.exit(0);
     }
   } catch (err) {

@@ -52,6 +52,7 @@ export async function initPostgresSchema(): Promise<boolean> {
         ALTER TABLE rooms ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
 
         -- Indexes
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_code_unique ON rooms (code);
         CREATE INDEX IF NOT EXISTS idx_rooms_code ON rooms (code);
         CREATE INDEX IF NOT EXISTS idx_rooms_updated_at ON rooms (updated_at);
         CREATE INDEX IF NOT EXISTS idx_rooms_host_id ON rooms (host_id);

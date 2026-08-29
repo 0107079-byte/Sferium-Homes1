@@ -11,7 +11,7 @@ import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer as createViteServer } from "vite";
 import { RoomState, ChatMessage, Member, VideoProvider, UserRole, RolePermissions, DEFAULT_ROLE_PERMISSIONS } from "./src/types";
-import { loadRoomFromDb, saveRoomToDb, deleteRoomFromDb, getAllRoomsFromDb } from "./src/db";
+import { loadRoomFromDb, saveRoomToDb, deleteRoomFromDb, getAllRoomsFromDb, normalizeRoomCode, addMemberToDb } from "./src/db";
 import { rooms, clientConnections, lastActionTimes, getUserEffectivePermissions, canActorManageTarget, ROLE_HIERARCHY } from "./backend/modules/sync";
 import { roomsRouter } from "./backend/routes/rooms";
 import {
@@ -783,9 +783,10 @@ const wss = new WebSocketServer({ noServer: true });
 
 wss.on("connection", async (ws: WebSocket, req) => {
   const urlParams = new URL(req.url || "", `http://${req.headers.host || "localhost"}`).searchParams;
-  const rawRoomId = urlParams.get("roomId") || "CINEMA";
+  const rawRoomId = urlParams.get("roomId") || "";
   const isLobby = rawRoomId.toUpperCase() === "LOBBY";
-  const roomId = isLobby ? "LOBBY" : parseRoomId(rawRoomId) || "CINEMA";
+  const cleanRoomId = isLobby ? "LOBBY" : normalizeRoomCode(rawRoomId);
+  const roomId = cleanRoomId || "LOBBY";
   const userId = urlParams.get("userId") || `user_${Math.random().toString(36).substring(2, 9)}`;
   const name = urlParams.get("name") || "Киноман";
   const avatar = urlParams.get("avatar") || "🍿";
@@ -795,7 +796,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
 
   clientConnections.set(ws, { ws, roomId, userId });
 
-  if (isLobby) {
+  if (isLobby || !cleanRoomId) {
     registerLobbySubscriber(ws);
     try {
       const roomList = await listRooms();
@@ -807,9 +808,6 @@ wss.on("connection", async (ws: WebSocket, req) => {
       console.warn("[LOBBY] Failed to send initial room list:", e);
     }
   } else {
-    // Normalize room identifier
-    const cleanRoomId = (roomId || "").trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
-
     let room = rooms[cleanRoomId];
     if (!room) {
       try {
@@ -1030,91 +1028,83 @@ wss.on("connection", async (ws: WebSocket, req) => {
 
       switch (msg.type) {
         case "join_room": {
-          const rawTargetId = msg.roomId || conn.roomId || "CINEMA";
-          const targetRoomId = parseRoomId(rawTargetId) || "CINEMA";
+          const rawTargetId = msg.roomId || conn.roomId;
+          const targetRoomId = normalizeRoomCode(rawTargetId);
           const targetUserId = msg.userId || conn.userId;
+
+          if (!targetRoomId) {
+            ws.send(JSON.stringify({
+              type: "error",
+              error: "INVALID_ROOM_CODE",
+              code: "INVALID_ROOM_CODE",
+              message: "Некорректный код комнаты",
+            }));
+            return;
+          }
           
           conn.roomId = targetRoomId;
           conn.userId = targetUserId;
           clientConnections.set(ws, conn);
           
-          if (!rooms[targetRoomId]) {
+          let targetRoom = rooms[targetRoomId];
+          if (!targetRoom) {
             try {
               const dbRoom = await loadRoomFromDb(targetRoomId);
               if (dbRoom) {
                 rooms[targetRoomId] = dbRoom;
                 rooms[targetRoomId].members = rooms[targetRoomId].members || {};
+                targetRoom = rooms[targetRoomId];
               }
             } catch (e) {
               console.warn(`[DB RESTORE ERROR in join_room] Room #${targetRoomId}:`, e);
             }
           }
 
-          if (!rooms[targetRoomId]) {
-            rooms[targetRoomId] = {
-              roomId: targetRoomId,
-              hostId: targetUserId,
-              videoUrl: "https://www.youtube.com/watch?v=jfKfPfyJRdk",
-              videoId: "jfKfPfyJRdk",
-              provider: "youtube",
-              playing: false,
-              isPlaying: false,
-              currentTime: 0.0,
-              lastUpdated: Date.now(),
-              anyoneCanControl: false,
-              members: {},
-              chatHistory: [
-                {
-                  id: `sys_init_${Date.now()}`,
-                  type: "system",
-                  text: `🍿 Зал Sferium Homes #${targetRoomId} был успешно открыт.`,
-                  timestamp: Date.now(),
-                }
-              ],
-            };
-            
-            if (isMediasoupSupported()) {
-              createSFURoom(targetRoomId).catch((err) => {
-                console.error(`[SFU] Failed to create SFU Room #${targetRoomId}:`, err.message);
-              });
-            }
+          if (!targetRoom) {
+            console.log(`[WS_ROOM_NOT_FOUND] User ${targetUserId} attempted to join non-existent room #${targetRoomId}`);
+            ws.send(JSON.stringify({
+              type: "error",
+              error: "ROOM_NOT_FOUND",
+              code: "ROOM_NOT_FOUND",
+              message: `Комната #${targetRoomId} не найдена в базе данных.`,
+            }));
+            ws.close(4004, "Room Not Found");
+            return;
           }
           
-          const currentRoomObj = rooms[targetRoomId];
           updateRoomCurrentTime(targetRoomId);
           
-          const isFirst = Object.keys(currentRoomObj.members).length === 0;
-          const isExist = !!currentRoomObj.members[targetUserId];
-          const isRecognizedHost = currentRoomObj.hostId === targetUserId;
-          const hostStatus = isExist
-            ? currentRoomObj.members[targetUserId].isHost
-            : (isFirst || isRecognizedHost);
+          const isRecognizedHost = targetRoom.hostId === targetUserId || Boolean(targetRoom.members?.[targetUserId]?.isHost);
+          const existingRole = targetRoom.members?.[targetUserId]?.role;
+          const userRole: UserRole = isRecognizedHost ? 'host' : (existingRole || targetRoom.defaultRole || 'member');
           
-          if (hostStatus) {
-            currentRoomObj.hostId = targetUserId;
-          }
-          
-          currentRoomObj.members[targetUserId] = {
+          const joinedMember: Member = {
             userId: targetUserId,
-            name: msg.name || "Киноман",
-            avatar: msg.avatar || "🍿",
-            color: msg.color || "text-indigo-400",
-            isHost: hostStatus,
+            name: msg.name || member?.name || "Гость",
+            avatar: msg.avatar || member?.avatar || "🍿",
+            color: msg.color || member?.color || "text-indigo-400",
+            isHost: isRecognizedHost,
+            role: userRole,
           };
           
-          addSystemMessage(currentRoomObj, `👋 ${msg.avatar || "🍿"} ${msg.name || "Киноман"} присоединился к залу.`, "join", targetUserId);
+          targetRoom.members = targetRoom.members || {};
+          targetRoom.members[targetUserId] = joinedMember;
+          
+          addSystemMessage(targetRoom, `👋 ${joinedMember.avatar} ${joinedMember.name} присоединился к залу.`, "join", targetUserId);
           
           ws.send(JSON.stringify({
             type: "room_state",
-            state: currentRoomObj,
+            state: { ...targetRoom, serverTime: Date.now() },
           }));
           
           broadcastToRoom(targetRoomId, {
             type: "room_state",
-            state: currentRoomObj,
+            state: { ...targetRoom, serverTime: Date.now() },
           });
 
-          saveRoomToDb(currentRoomObj);
+          await saveRoomToDb(targetRoom);
+          await addMemberToDb(targetRoomId, joinedMember);
+          broadcastLobbyUpdate();
           break;
         }
 
