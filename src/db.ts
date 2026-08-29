@@ -56,19 +56,19 @@ async function ensureDb(): Promise<boolean> {
 }
 
 /**
- * Load room from PostgreSQL (Source of Truth) or fallback memory store
+ * Load room from PostgreSQL (Source of Truth) or local memory store
  * Checks both room_id and code
  */
 export async function loadRoomFromDb(identifier: string): Promise<RoomState | null> {
   const cleanId = normalizeRoomCode(identifier);
   if (!cleanId) return null;
 
-  try {
-    const isPgAvailable = await ensureDb();
-    const pool = getPgPool();
+  const isPgAvailable = await ensureDb();
+  const pool = getPgPool();
 
-    if (isPgAvailable && pool) {
-      console.log(`[ROOM_LOOKUP] Searching PostgreSQL for room identifier="${cleanId}"`);
+  if (isPgAvailable && pool) {
+    try {
+      console.log(`[ROOM_LOOKUP_DB] Searching PostgreSQL for room identifier="${cleanId}"`);
       const res = await pool.query(
         "SELECT room_id, code, host_id, data FROM rooms WHERE room_id = $1 OR code = $1 LIMIT 1",
         [cleanId]
@@ -103,14 +103,17 @@ export async function loadRoomFromDb(identifier: string): Promise<RoomState | nu
         console.log(`[ROOM_FOUND] Found room #${room.roomId} in PostgreSQL (hostId=${room.hostId}, membersCount=${Object.keys(room.members || {}).length})`);
         return room;
       }
+      // Explicitly NOT in DB -> purge any memory cache
+      delete memoryStore[cleanId];
       console.log(`[ROOM_NOT_FOUND] Room "${cleanId}" does NOT exist in PostgreSQL`);
       return null;
+    } catch (err: any) {
+      console.error(`[ROOM_DB_FAILURE] Database error loading room ${cleanId} from PostgreSQL:`, err.message);
+      throw new Error(`DATABASE_UNAVAILABLE: ${err.message}`);
     }
-  } catch (err: any) {
-    console.warn(`[DB] Error loading room ${cleanId} from PostgreSQL:`, err.message);
   }
 
-  // Fallback memory store lookup
+  // Local fallback when PostgreSQL is not configured (e.g. CLI tests)
   const room = memoryStore[cleanId] || null;
   if (room) {
     console.log(`[ROOM_FOUND] Found room #${cleanId} in memory store`);
@@ -127,13 +130,12 @@ export async function saveRoomToDb(room: RoomState): Promise<void> {
   if (!room || !room.roomId) return;
   const cleanId = normalizeRoomCode(room.roomId);
   room.roomId = cleanId;
-  memoryStore[cleanId] = { ...room };
 
-  try {
-    const isPgAvailable = await ensureDb();
-    const pool = getPgPool();
+  const isPgAvailable = await ensureDb();
+  const pool = getPgPool();
 
-    if (isPgAvailable && pool) {
+  if (isPgAvailable && pool) {
+    try {
       // 1. Save room record
       await pool.query(
         `INSERT INTO rooms (room_id, code, host_id, data, updated_at)
@@ -165,9 +167,15 @@ export async function saveRoomToDb(room: RoomState): Promise<void> {
           }
         }
       }
+      memoryStore[cleanId] = { ...room };
+      console.log(`[ROOM_CREATE_DB_SUCCESS] Room #${cleanId} saved to PostgreSQL.`);
+    } catch (err: any) {
+      delete memoryStore[cleanId];
+      console.error(`[ROOM_CREATE_DB_FAILURE] Error saving room ${cleanId} to PostgreSQL:`, err.message);
+      throw new Error(`DATABASE_SAVE_FAILED: ${err.message}`);
     }
-  } catch (err: any) {
-    console.warn(`[DB] Error saving room ${cleanId} to PostgreSQL:`, err.message);
+  } else {
+    memoryStore[cleanId] = { ...room };
   }
 }
 

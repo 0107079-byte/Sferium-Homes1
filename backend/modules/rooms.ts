@@ -224,17 +224,28 @@ export async function getRoomByIdOrCode(identifier: string): Promise<RoomState |
   const cleanId = normalizeRoomCode(identifier);
   if (!cleanId) return null;
 
-  if (rooms[cleanId]) {
-    return rooms[cleanId];
+  try {
+    const dbRoom = await loadRoomFromDb(cleanId);
+    if (dbRoom) {
+      if (rooms[cleanId]) {
+        // Merge runtime memory states (playback time, socket members) onto persistent room
+        dbRoom.currentTime = rooms[cleanId].currentTime ?? dbRoom.currentTime;
+        dbRoom.playing = rooms[cleanId].playing ?? dbRoom.playing;
+        dbRoom.isPlaying = rooms[cleanId].isPlaying ?? dbRoom.isPlaying;
+        dbRoom.members = { ...dbRoom.members, ...rooms[cleanId].members };
+        dbRoom.chatHistory = rooms[cleanId].chatHistory || dbRoom.chatHistory;
+      }
+      rooms[cleanId] = dbRoom;
+      return dbRoom;
+    } else {
+      // Room was deleted or never existed in PostgreSQL -> remove from runtime memory
+      delete rooms[cleanId];
+      return null;
+    }
+  } catch (err: any) {
+    console.error(`[ROOM_RESOLVE_ERROR] Failed to query PostgreSQL for room #${cleanId}:`, err.message);
+    throw err;
   }
-
-  const dbRoom = await loadRoomFromDb(cleanId);
-  if (dbRoom) {
-    rooms[dbRoom.roomId] = dbRoom;
-    return dbRoom;
-  }
-
-  return null;
 }
 
 /**

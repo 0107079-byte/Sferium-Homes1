@@ -18,6 +18,7 @@ import {
   listRooms,
   createRoom,
   deleteRoom,
+  getRoomByIdOrCode,
   seedInitialRoomsIfEmpty,
   registerLobbySubscriber,
   unregisterLobbySubscriber,
@@ -808,21 +809,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
       console.warn("[LOBBY] Failed to send initial room list:", e);
     }
   } else {
-    let room = rooms[cleanRoomId];
-    if (!room) {
-      try {
-        console.log(`[WEBSOCKET_LOOKUP] Querying DB for room #${cleanRoomId} for connecting client ${userId}`);
-        const dbRoom = await loadRoomFromDb(cleanRoomId);
-        if (dbRoom) {
-          rooms[cleanRoomId] = dbRoom;
-          rooms[cleanRoomId].members = rooms[cleanRoomId].members || {};
-          room = rooms[cleanRoomId];
-          console.log(`[WEBSOCKET_ROOM_FOUND] Loaded room #${cleanRoomId} from persistent DB.`);
-        }
-      } catch (e) {
-        console.warn(`[DB RESTORE ERROR] Could not load room #${cleanRoomId}:`, e);
-      }
-    }
+    let room = await getRoomByIdOrCode(cleanRoomId);
 
     if (!room) {
       console.log(`[WEBSOCKET_ROOM_NOT_FOUND] Client ${userId} (${name}) tried to connect to non-existent room #${cleanRoomId}. Rejecting.`);
@@ -1046,19 +1033,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
           conn.userId = targetUserId;
           clientConnections.set(ws, conn);
           
-          let targetRoom = rooms[targetRoomId];
-          if (!targetRoom) {
-            try {
-              const dbRoom = await loadRoomFromDb(targetRoomId);
-              if (dbRoom) {
-                rooms[targetRoomId] = dbRoom;
-                rooms[targetRoomId].members = rooms[targetRoomId].members || {};
-                targetRoom = rooms[targetRoomId];
-              }
-            } catch (e) {
-              console.warn(`[DB RESTORE ERROR in join_room] Room #${targetRoomId}:`, e);
-            }
-          }
+          let targetRoom = await getRoomByIdOrCode(targetRoomId);
 
           if (!targetRoom) {
             console.log(`[WS_ROOM_NOT_FOUND] User ${targetUserId} attempted to join non-existent room #${targetRoomId}`);
@@ -1080,9 +1055,9 @@ wss.on("connection", async (ws: WebSocket, req) => {
           
           const joinedMember: Member = {
             userId: targetUserId,
-            name: msg.name || member?.name || "Гость",
-            avatar: msg.avatar || member?.avatar || "🍿",
-            color: msg.color || member?.color || "text-indigo-400",
+            name: msg.name || "Гость",
+            avatar: msg.avatar || "🍿",
+            color: msg.color || "text-indigo-400",
             isHost: isRecognizedHost,
             role: userRole,
           };

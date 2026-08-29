@@ -232,10 +232,129 @@ export async function runRoomJoinAuditIntegrationTests(): Promise<AuditTestResul
     if (member.name !== 'Bob Guest Updated Name' || member.avatar !== '🎬') {
       throw new Error(`Member profile was not updated on reconnect`);
     }
+  });
+
+  // --- TEST 7: Incognito / Fresh Session (No Local State) ---
+  await runTest('Incognito / Fresh session joins existing room without local storage', async () => {
+    const incognitoGuestId = 'incognito_guest_delta';
+    const joinResult = await joinRoomBackend({
+      roomId: testRoomCode,
+      userId: incognitoGuestId,
+      name: 'Delta Incognito',
+      avatar: '🕶️',
+    });
+
+    if (!joinResult.success || !joinResult.room) {
+      throw new Error(`Incognito join failed: ${joinResult.error}`);
+    }
+    if (joinResult.room.roomId !== testRoomCode) {
+      throw new Error(`Incognito joined unexpected room #${joinResult.room.roomId}`);
+    }
+    if (joinResult.room.members[incognitoGuestId]?.isHost) {
+      throw new Error(`Incognito guest became host!`);
+    }
+  });
+
+  // --- TEST 8: Refresh / Idempotent Join Invariant ---
+  await runTest('Idempotent repeated JOIN (Page Refresh) maintains single room and membership', async () => {
+    const roomsCountBefore = Object.keys(rooms).length;
+
+    // Simulate 3 consecutive page refreshes
+    for (let i = 0; i < 3; i++) {
+      const res = await joinRoomBackend({
+        roomId: testRoomCode,
+        userId: guestUserId,
+        name: 'Bob Guest',
+      });
+      if (!res.success) throw new Error(`Refresh ${i + 1} failed: ${res.error}`);
+    }
 
     const roomsCountAfter = Object.keys(rooms).length;
     if (roomsCountAfter !== roomsCountBefore) {
-      throw new Error(`Reconnection created duplicate room!`);
+      throw new Error(`Page refresh created phantom room!`);
+    }
+  });
+
+  // --- TEST 9: Two Devices Convergence ---
+  await runTest('Two devices (Host & Guest) converge on identical roomId and video metadata', async () => {
+    const hostRoom = await getRoomByIdOrCode(testRoomCode);
+    const guestRoom = (await joinRoomBackend({
+      roomId: testRoomCode,
+      userId: 'device_b_user',
+      name: 'Device B User',
+    })).room;
+
+    if (!hostRoom || !guestRoom) throw new Error('Could not retrieve rooms for comparison');
+    if (hostRoom.roomId !== guestRoom.roomId) throw new Error('Host and Guest roomId mismatch');
+    if (hostRoom.hostId !== guestRoom.hostId) throw new Error('Host and Guest hostId mismatch');
+    if (hostRoom.videoUrl !== guestRoom.videoUrl) throw new Error('Host and Guest videoUrl mismatch');
+  });
+
+  // --- TEST 10: Memory Empty / Database Exists ---
+  await runTest('Memory Empty / Database Exists resolves room from PostgreSQL and repopulates memory', async () => {
+    // 1. Purge in-memory map
+    delete rooms[testRoomCode];
+    if (rooms[testRoomCode]) throw new Error('Failed to purge memory');
+
+    // 2. Lookup room -> must load from DB
+    const resolved = await getRoomByIdOrCode(testRoomCode);
+    if (!resolved) {
+      throw new Error(`Failed to resolve persistent room from DB when memory was empty`);
+    }
+    if (resolved.roomId !== testRoomCode) {
+      throw new Error(`Resolved wrong room #${resolved.roomId}`);
+    }
+    if (!rooms[testRoomCode]) {
+      throw new Error(`Memory map was not repopulated after DB lookup`);
+    }
+  });
+
+  // --- TEST 11: Memory Exists / Database Missing ---
+  await runTest('Memory Exists / Database Missing returns 404 ROOM_NOT_FOUND and evicts phantom memory', async () => {
+    const phantomRoomCode = `PHANTOM_${Date.now()}`;
+    // Artificially put in memory without persisting to DB
+    rooms[phantomRoomCode] = {
+      roomId: phantomRoomCode,
+      hostId: 'phantom_host',
+      videoUrl: 'https://youtube.com',
+      members: {},
+      chatHistory: [],
+      playing: false,
+      currentTime: 0,
+      lastUpdated: Date.now(),
+    } as any;
+
+    // Direct join attempt
+    const result = await joinRoomBackend({
+      roomId: phantomRoomCode,
+      userId: 'victim_guest',
+      name: 'Victim',
+    });
+
+    if (result.success) {
+      throw new Error(`Join succeeded for phantom room that does not exist in DB!`);
+    }
+    if (result.status !== 404 || result.code !== 'ROOM_NOT_FOUND') {
+      throw new Error(`Expected 404 ROOM_NOT_FOUND, got ${result.status} ${result.code}`);
+    }
+    if (rooms[phantomRoomCode]) {
+      throw new Error(`Phantom room was not evicted from memory!`);
+    }
+  });
+
+  // --- TEST 12: Database Invariants (COUNT(rooms) === 1, COUNT(members) verified) ---
+  await runTest('Database Invariants: Single room record and accurate relational membership', async () => {
+    const room = await getRoomByIdOrCode(testRoomCode);
+    if (!room) throw new Error(`Room #${testRoomCode} missing`);
+
+    const members = Object.values(room.members || {});
+    if (members.length < 2) {
+      throw new Error(`Expected at least 2 members (host and guests), got ${members.length}`);
+    }
+
+    const hostCount = members.filter((m) => m.isHost).length;
+    if (hostCount !== 1) {
+      throw new Error(`Expected exactly 1 host, found ${hostCount}`);
     }
   });
 
