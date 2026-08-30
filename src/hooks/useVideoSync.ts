@@ -97,26 +97,20 @@ export function useVideoSync({
 
   // Sync WebSocket listeners
   useEffect(() => {
-    const handleSyncPacket = (data: any) => {
+    const handleSyncState = (data: any) => {
       if (!data) return;
       if (data.roomId && data.roomId !== roomId) return;
 
       const rawTime = Number(
-        data.hostTime !== undefined
-          ? data.hostTime
+        data.position !== undefined
+          ? data.position
           : data.time !== undefined
           ? data.time
           : data.currentTime ?? 0
       );
-      const isPlay = Boolean(
-        data.hostPlaying !== undefined
-          ? data.hostPlaying
-          : data.isPlaying !== undefined
-          ? data.isPlaying
-          : data.playing
-      );
+      const isPlay = Boolean(data.playing !== undefined ? data.playing : data.isPlaying);
       const now = Date.now();
-      const transitSec = data.timestamp ? Math.min(1.5, Math.max(0, (now - data.timestamp) / 1000)) : 0;
+      const transitSec = data.serverTime ? Math.min(1.5, Math.max(0, (now - data.serverTime) / 1000)) : 0;
       const computedHostTime = isPlay ? rawTime + transitSec : rawTime;
 
       setSyncedState({
@@ -132,33 +126,37 @@ export function useVideoSync({
       }
     };
 
-    const unsubVideoSync = syncSocket.on('video_sync', handleSyncPacket);
-    const unsubSyncState = syncSocket.on('sync:state', handleSyncPacket);
-    const unsubPlayerState = syncSocket.on('player:state', handleSyncPacket);
-    
-    const unsubSyncPlay = syncSocket.on('sync:play', (data) => {
-      handleSyncPacket({ ...data, isPlaying: true });
-      if (!isHost) onSyncPlay?.();
-    });
+    const handleSyncCommand = (data: any) => {
+      if (!data) return;
+      if (data.roomId && data.roomId !== roomId) return;
 
-    const unsubSyncPause = syncSocket.on('sync:pause', (data) => {
-      handleSyncPacket({ ...data, isPlaying: false });
-      if (!isHost) onSyncPause?.();
-    });
+      const command = data.command || data.cmd;
+      const cmdTime = Number(data.position !== undefined ? data.position : data.time ?? currentTime);
 
-    const unsubSyncSeek = syncSocket.on('sync:seek', (data) => {
-      const seekTime = Number(data?.time ?? data?.currentTime ?? data?.payload?.time ?? 0);
-      handleSyncPacket({ ...data, hostTime: seekTime, time: seekTime });
-      if (!isHost) onSyncSeek?.(seekTime);
-    });
+      if (command === 'play') {
+        setCurrentIsPlaying(true);
+        if (data.position !== undefined || data.time !== undefined) {
+          setCurrentTimelineTime(cmdTime);
+        }
+        if (!isHost) onSyncPlay?.();
+      } else if (command === 'pause') {
+        setCurrentIsPlaying(false);
+        if (data.position !== undefined || data.time !== undefined) {
+          setCurrentTimelineTime(cmdTime);
+        }
+        if (!isHost) onSyncPause?.();
+      } else if (command === 'seek') {
+        setCurrentTimelineTime(cmdTime);
+        if (!isHost) onSyncSeek?.(cmdTime);
+      }
+    };
+
+    const unsubSyncState = syncSocket.on('SYNC_STATE', handleSyncState);
+    const unsubSyncCommand = syncSocket.on('SYNC_COMMAND', handleSyncCommand);
 
     return () => {
-      unsubVideoSync();
       unsubSyncState();
-      unsubPlayerState();
-      unsubSyncPlay();
-      unsubSyncPause();
-      unsubSyncSeek();
+      unsubSyncCommand();
     };
   }, [roomId, isHost, currentTime, onSyncPlay, onSyncPause, onSyncSeek]);
 

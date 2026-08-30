@@ -170,8 +170,10 @@ export async function runRealPipelineIntegrationTests(): Promise<PipelineTestRes
 
     // Send Revision 10: pos = 120s
     guestPlugin.handleIncomingMessage({
-      type: 'video:seek',
+      type: 'SYNC_COMMAND',
+      command: 'seek',
       roomId: 'TEST_ROOM_2',
+      position: 120,
       time: 120,
       revision: 10,
       serverTime: Date.now(),
@@ -181,8 +183,10 @@ export async function runRealPipelineIntegrationTests(): Promise<PipelineTestRes
 
     // Send Stale Revision 5: pos = 30s (must be rejected)
     guestPlugin.handleIncomingMessage({
-      type: 'video:seek',
+      type: 'SYNC_COMMAND',
+      command: 'seek',
       roomId: 'TEST_ROOM_2',
+      position: 30,
       time: 30,
       revision: 5,
       serverTime: Date.now() - 5000,
@@ -210,10 +214,12 @@ export async function runRealPipelineIntegrationTests(): Promise<PipelineTestRes
     // Simulate server being 2000ms ahead of client
     const serverTimestamp = Date.now() - 2000;
     plugin.handleIncomingMessage({
-      type: 'video:sync',
+      type: 'SYNC_STATE',
       roomId: 'TEST_ROOM_3',
+      position: 50.0,
       time: 50.0,
       playing: true,
+      playbackRate: 1.0,
       rate: 1.0,
       serverTime: serverTimestamp,
       revision: 1,
@@ -288,8 +294,10 @@ export async function runRealPipelineIntegrationTests(): Promise<PipelineTestRes
     // Fire 20 seeks in rapid succession
     for (let i = 1; i <= 20; i++) {
       guestPlugin.handleIncomingMessage({
-        type: 'video:seek',
+        type: 'SYNC_COMMAND',
+        command: 'seek',
         roomId: 'TEST_ROOM_5',
+        position: i * 5,
         time: i * 5,
         revision: i,
         serverTime: Date.now(),

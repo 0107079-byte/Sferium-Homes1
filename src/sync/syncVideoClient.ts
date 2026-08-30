@@ -248,26 +248,22 @@ export function initVideoSync({
     sendPlay(time?: number) {
       const t = time !== undefined ? time : dynamicPlayer.getCurrentTime();
       plugin.notifyPlay();
-      send('video:play', { time: t, playing: true });
-      send('sync:play', { currentTime: t, time: t });
+      send('SYNC_COMMAND', { command: 'play', position: t, time: t, playing: true });
       onSyncEvent?.({ type: 'play', isPlaying: true, time: t });
     },
     sendPause(time?: number) {
       const t = time !== undefined ? time : dynamicPlayer.getCurrentTime();
       plugin.notifyPause();
-      send('video:pause', { time: t, playing: false });
-      send('sync:pause', { currentTime: t, time: t });
+      send('SYNC_COMMAND', { command: 'pause', position: t, time: t, playing: false });
       onSyncEvent?.({ type: 'pause', isPlaying: false, time: t });
     },
     sendSeek(time: number) {
       plugin.notifySeek(time);
-      send('video:seek', { time, currentTime: time });
-      send('sync:seek', { time, currentTime: time, payload: { time } });
+      send('SYNC_COMMAND', { command: 'seek', position: time, time });
       onSyncEvent?.({ type: 'seek', time });
     },
     sendState(time: number, isPlaying: boolean) {
-      send('video:sync', { time, currentTime: time, playing: isPlaying, rate: 1.0 });
-      send('sync:state', { time, currentTime: time, isPlaying, playing: isPlaying });
+      send('SYNC_STATE', { position: time, time, playing: isPlaying, playbackRate: 1.0, rate: 1.0 });
       onSyncEvent?.({ type: 'state', time, isPlaying });
     },
     plugin,

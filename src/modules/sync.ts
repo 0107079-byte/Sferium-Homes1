@@ -77,22 +77,9 @@ export class SyncEngine {
   }
 
   private setupSocketListeners() {
-    syncSocket.on('sync:state', (state: RoomState) => this.handleServerState(state));
-    syncSocket.on('room_state', (data: SocketMessage) => {
-      if (data.state) {
-        this.handleServerState(data.state);
-      }
-    });
-
-    syncSocket.on('sync:video_url', (data: SocketMessage) => {
-      if (data.videoUrl) {
-        this.handleVideoChange(data.videoUrl);
-      }
-    });
-
-    syncSocket.on('video_sync', (data: SocketMessage) => {
-      const rawHostTime = Number(data.hostTime !== undefined ? data.hostTime : data.currentTime ?? data.time ?? 0);
-      const hostPlaying = Boolean(data.hostPlaying !== undefined ? data.hostPlaying : (data.playing ?? data.isPlaying));
+    syncSocket.on('SYNC_STATE', (data: any) => {
+      const rawHostTime = Number(data.position !== undefined ? data.position : data.currentTime ?? data.time ?? 0);
+      const hostPlaying = Boolean(data.playing !== undefined ? data.playing : data.isPlaying);
       const hostProvider = (data.hostProvider || data.provider || 'youtube') as VideoProvider;
 
       if (this.roomState) {
@@ -115,6 +102,18 @@ export class SyncEngine {
         playbackRate: data.rate || data.playbackRate || 1,
         timestamp: data.updatedAt || Date.now(),
       }));
+    });
+
+    syncSocket.on('room_state', (data: SocketMessage) => {
+      if (data.state) {
+        this.handleServerState(data.state);
+      }
+    });
+
+    syncSocket.on('sync:video_url', (data: SocketMessage) => {
+      if (data.videoUrl) {
+        this.handleVideoChange(data.videoUrl);
+      }
     });
   }
 

@@ -559,59 +559,10 @@ export function App() {
                 setLocalTime(message.state.currentTime);
               }
               break;
-            case 'player:state':
-            case 'playback_change': {
-              const newPlaying = Boolean(message.playing ?? (message.state === 'playing'));
-              const newTime = message.currentTime !== undefined ? message.currentTime : message.time;
 
-              setRoomState((prev) => {
-                if (!prev) return null;
-                return {
-                  ...prev,
-                  playing: newPlaying,
-                  isPlaying: newPlaying,
-                  ...(newTime !== undefined ? { currentTime: newTime } : {}),
-                };
-              });
-
-              if (newTime !== undefined) {
-                setLocalTime(newTime);
-              }
-
-              if (message.senderId !== userId && playerRef.current) {
-                if (newTime !== undefined) {
-                  const cur = playerRef.current.getCurrentTime ? playerRef.current.getCurrentTime() : 0;
-                  if (Math.abs(cur - newTime) > 0.2) {
-                    playerRef.current.seekTo(newTime);
-                  }
-                }
-                if (newPlaying) {
-                  playerRef.current.play();
-                } else {
-                  playerRef.current.pause();
-                }
-              }
-              break;
-            }
-            case 'player:seek':
-            case 'sync_seek': {
-              const targetTime = message.currentTime !== undefined ? message.currentTime : message.time;
-              if (targetTime !== undefined) {
-                setLocalTime(targetTime);
-                setRoomState((prev) => prev ? { ...prev, currentTime: targetTime } : null);
-                if (message.senderId !== userId && playerRef.current) {
-                  playerRef.current.seekTo(targetTime);
-                }
-              }
-              break;
-            }
-            case 'player:heartbeat':
-            case 'heartbeat_sync': {
-              const currentRoomState = roomStateRef.current;
-              const isMeHost = currentRoomState?.members[userId]?.isHost || false;
-              
-              const serverTime = Number(message.currentTime !== undefined ? message.currentTime : message.time);
-              const serverPlaying = Boolean(message.playing ?? message.isPlaying ?? (message.state === 'playing'));
+            case 'SYNC_STATE': {
+              const serverTime = Number(message.position !== undefined ? message.position : message.time ?? 0);
+              const serverPlaying = Boolean(message.playing !== undefined ? message.playing : message.isPlaying);
 
               setRoomState((prev) => {
                 if (!prev) return null;
@@ -625,12 +576,11 @@ export function App() {
 
               setLocalTime(serverTime);
 
-              // Hard Sync Drift Correction (< 0.2s) for Slave Player
               if (message.senderId !== userId && playerRef.current) {
                 const localT = playerRef.current.getCurrentTime ? (playerRef.current.getCurrentTime() || 0) : 0;
                 const diff = Math.abs(serverTime - localT);
                 
-                if (diff > 0.2) {
+                if (diff > 0.3) {
                   playerRef.current.seekTo(serverTime);
                 }
                 
@@ -642,13 +592,43 @@ export function App() {
               }
               break;
             }
-            case "apply_force_sync": {
-              if (message.currentTime !== undefined) {
-                setLocalTime(message.currentTime);
-                playerRef.current?.seekTo(message.currentTime);
+
+            case 'SYNC_COMMAND': {
+              const command = message.command || message.cmd;
+              const cmdTime = message.position !== undefined ? Number(message.position) : (message.time !== undefined ? Number(message.time) : undefined);
+
+              if (command === 'play') {
+                setRoomState((prev) => prev ? { ...prev, playing: true, isPlaying: true, ...(cmdTime !== undefined ? { currentTime: cmdTime } : {}) } : null);
+                if (cmdTime !== undefined) setLocalTime(cmdTime);
+                if (message.senderId !== userId && playerRef.current) {
+                  if (cmdTime !== undefined) {
+                    const cur = playerRef.current.getCurrentTime ? playerRef.current.getCurrentTime() : 0;
+                    if (Math.abs(cur - cmdTime) > 0.3) playerRef.current.seekTo(cmdTime);
+                  }
+                  playerRef.current.play();
+                }
+              } else if (command === 'pause') {
+                setRoomState((prev) => prev ? { ...prev, playing: false, isPlaying: false, ...(cmdTime !== undefined ? { currentTime: cmdTime } : {}) } : null);
+                if (cmdTime !== undefined) setLocalTime(cmdTime);
+                if (message.senderId !== userId && playerRef.current) {
+                  if (cmdTime !== undefined) {
+                    const cur = playerRef.current.getCurrentTime ? playerRef.current.getCurrentTime() : 0;
+                    if (Math.abs(cur - cmdTime) > 0.3) playerRef.current.seekTo(cmdTime);
+                  }
+                  playerRef.current.pause();
+                }
+              } else if (command === 'seek') {
+                if (cmdTime !== undefined) {
+                  setLocalTime(cmdTime);
+                  setRoomState((prev) => prev ? { ...prev, currentTime: cmdTime } : null);
+                  if (message.senderId !== userId && playerRef.current) {
+                    playerRef.current.seekTo(cmdTime);
+                  }
+                }
               }
               break;
             }
+
             case "error":
               if (message.code === 'ROOM_NOT_FOUND' || message.error === 'ROOM_NOT_FOUND') {
                 setJoinError({
@@ -1185,19 +1165,12 @@ export function App() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
-          type: "player:state",
-          playing: true,
-          isPlaying: true,
-          state: "playing",
-          currentTime: currentT,
+          type: "SYNC_COMMAND",
+          command: "play",
+          position: currentT,
           time: currentT,
-          playbackRate: 1,
-        })
-      );
-      wsRef.current.send(
-        JSON.stringify({
-          type: "sync_play",
-          currentTime: currentT,
+          playing: true,
+          updatedAt: Date.now(),
         })
       );
     }
@@ -1220,19 +1193,12 @@ export function App() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
-          type: "player:state",
-          playing: false,
-          isPlaying: false,
-          state: "paused",
-          currentTime: currentT,
+          type: "SYNC_COMMAND",
+          command: "pause",
+          position: currentT,
           time: currentT,
-          playbackRate: 1,
-        })
-      );
-      wsRef.current.send(
-        JSON.stringify({
-          type: "sync_pause",
-          currentTime: currentT,
+          playing: false,
+          updatedAt: Date.now(),
         })
       );
     }
@@ -1254,16 +1220,11 @@ export function App() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
-          type: "player:seek",
-          currentTime: time,
+          type: "SYNC_COMMAND",
+          command: "seek",
+          position: time,
           time: time,
-          playing: roomState?.playing ?? true,
-        })
-      );
-      wsRef.current.send(
-        JSON.stringify({
-          type: "sync_seek",
-          currentTime: time,
+          updatedAt: Date.now(),
         })
       );
     }
@@ -1299,16 +1260,13 @@ export function App() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
-          type: "player:seek",
-          currentTime: currentT,
+          type: "SYNC_STATE",
+          position: currentT,
           time: currentT,
-          playing: roomState?.playing ?? true,
-        })
-      );
-      wsRef.current.send(
-        JSON.stringify({
-          type: "force_sync",
-          currentTime: currentT,
+          playing: roomState?.playing ?? false,
+          playbackRate: 1.0,
+          rate: 1.0,
+          updatedAt: Date.now(),
         })
       );
     }
@@ -1322,24 +1280,17 @@ export function App() {
     const isMeHost = currentRoomState.members[userId]?.isHost || currentRoomState.anyoneCanControl;
     if (isMeHost) {
       const now = Date.now();
-      if (now - lastHeartbeatSentRef.current >= 750) {
+      if (now - lastHeartbeatSentRef.current >= 1000) {
         lastHeartbeatSentRef.current = now;
         wsRef.current.send(
           JSON.stringify({
-            type: "player:heartbeat",
-            currentTime: time,
+            type: "SYNC_STATE",
+            position: time,
             time: time,
-            playing: currentRoomState.playing || false,
-            isPlaying: currentRoomState.playing || false,
-            state: currentRoomState.playing ? "playing" : "paused",
-            playbackRate: 1,
-          })
-        );
-        wsRef.current.send(
-          JSON.stringify({
-            type: "heartbeat_update",
-            currentTime: time,
-            playing: currentRoomState.playing || false,
+            playing: Boolean(currentRoomState.playing),
+            playbackRate: 1.0,
+            rate: 1.0,
+            updatedAt: now,
           })
         );
       }
@@ -1482,14 +1433,18 @@ export function App() {
     const interval = setInterval(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         const now = Date.now();
-        // Резервная отправка хертбита только если за последние 2.5 секунды не было сообщений
+        // Резервная отправка синхронизации только если за последние 2.5 секунды не было сообщений
         if (now - lastHeartbeatSentRef.current >= 2500) {
           lastHeartbeatSentRef.current = now;
           const currentT = playerRef.current?.getCurrentTime() || 0;
           wsRef.current.send(JSON.stringify({
-            type: "heartbeat_update",
-            currentTime: currentT,
-            playing: roomState?.playing || false,
+            type: "SYNC_STATE",
+            position: currentT,
+            time: currentT,
+            playing: Boolean(roomState?.playing),
+            playbackRate: 1.0,
+            rate: 1.0,
+            updatedAt: now,
           }));
         }
       }

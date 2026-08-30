@@ -947,15 +947,9 @@ wss.on("connection", async (ws: WebSocket, req) => {
       }
 
       const rateLimitedTypes = [
-        "sync_play",
-        "sync_pause",
-        "sync_seek",
-        "VIDEO_SYNC",
-        "video_state_change",
-        "seek",
-        "seek_back",
-        "seek_fwd",
-        "force_sync_all"
+        "change_video",
+        "video:reaction",
+        "poll:create"
       ];
 
       if (rateLimitedTypes.includes(msg.type)) {
@@ -963,24 +957,14 @@ wss.on("connection", async (ws: WebSocket, req) => {
         const actionTypeKey = `${conn.roomId}:${conn.userId}:${msg.type}`;
         const lastActionTypeTime = lastActionTimes.get(actionTypeKey) || 0;
         
-        if (now - lastActionTypeTime < 5000) {
-          console.warn(`[RATE LIMIT] Ignored repeated event '${msg.type}' from user: ${member.name} (${conn.userId}) within 5s`);
+        if (now - lastActionTypeTime < 3000) {
+          console.warn(`[RATE LIMIT] Ignored repeated event '${msg.type}' from user: ${member.name} (${conn.userId}) within 3s`);
           return;
         }
         lastActionTimes.set(actionTypeKey, now);
       }
 
-      const isSeekCommand = 
-        msg.type === "sync_seek" ||
-        msg.type === "seek" ||
-        msg.type === "seek_back" ||
-        msg.type === "seek_fwd" ||
-        (msg.type === "VIDEO_SYNC" && (
-          msg.action === "seek" ||
-          msg.action === "seek_back" ||
-          msg.action === "seek_fwd" ||
-          msg.action === "SEEK_PLAY"
-        ));
+      const isSeekCommand = msg.type === "SYNC_COMMAND" && (msg.command === "seek" || msg.cmd === "seek");
 
       if (currentRoom.mediaType === "live" && isSeekCommand) {
         console.warn(`[LIVE LOCK] Blocked seek command '${msg.type}' from user ${conn.userId} in room #${conn.roomId} (mediaType is live)`);
@@ -992,25 +976,13 @@ wss.on("connection", async (ws: WebSocket, req) => {
       }
 
       const isControlLocked = !currentRoom.anyoneCanControl || currentRoom.isLocked === true;
-      if (isControlLocked && !isHost && rateLimitedTypes.includes(msg.type)) {
+      if (isControlLocked && !isHost && (msg.type === "SYNC_COMMAND" || msg.type === "change_video")) {
         console.warn(`[HOST VALIDATION] Denied control event '${msg.type}' from non-host ${conn.userId} in room #${conn.roomId}`);
         ws.send(JSON.stringify({
           type: "error",
           message: "Управление заблокировано создателем зала"
         }));
         return;
-      }
-
-      // Plugin sync handler for video synchronization
-      if (typeof msg.type === "string" && msg.type.startsWith("sync:")) {
-        handleSyncMessage(
-          msg,
-          { id: conn.userId, userId: conn.userId, isHost },
-          currentRoom,
-          (targetRoomId, payload) => {
-            broadcastToRoom(targetRoomId, payload);
-          }
-        );
       }
 
       switch (msg.type) {
@@ -1083,8 +1055,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
           break;
         }
 
-        case "sync:video_url":
-        case "change_video":
+        case "change_video": {
           if (!canControl) return;
           const provider = serverDetectProvider(msg.videoUrl);
           const extractedId = serverExtractVideoId(msg.videoUrl, provider);
@@ -1122,552 +1093,61 @@ wss.on("connection", async (ws: WebSocket, req) => {
             });
           }
           break;
-
-        case "video:play":
-        case "sync:play":
-        case "play_video":
-        case "sync_play": {
-          if (!canControl) return;
-          currentRoom.playing = true;
-          currentRoom.isPlaying = true;
-          if (msg.currentTime !== undefined) {
-            currentRoom.currentTime = parseFloat(msg.currentTime);
-          } else if (msg.time !== undefined) {
-            currentRoom.currentTime = parseFloat(msg.time);
-          }
-          const playRate = typeof msg.rate === "number" ? msg.rate : 1.0;
-          const playUpdatedAt = msg.updatedAt || Date.now();
-          currentRoom.lastUpdated = playUpdatedAt;
-          currentRoom.revision = (currentRoom.revision || 0) + 1;
-          const currentRev = currentRoom.revision;
-          const nowServerTime = Date.now();
-
-          addSystemMessage(currentRoom, `▶ ${member.avatar} ${member.name} включил воспроизведение.`, "play", conn.userId);
-
-          broadcastToRoom(conn.roomId, {
-            type: "video:play",
-            roomId: conn.roomId,
-            time: currentRoom.currentTime,
-            playing: true,
-            rate: playRate,
-            updatedAt: playUpdatedAt,
-            serverTime: nowServerTime,
-            revision: currentRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "sync:play",
-            roomId: conn.roomId,
-            currentTime: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            serverTime: nowServerTime,
-            revision: currentRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "playback_change",
-            playing: true,
-            currentTime: currentRoom.currentTime,
-            serverTime: nowServerTime,
-            revision: currentRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "room_state",
-            state: { ...currentRoom, serverTime: nowServerTime },
-          });
-
-          saveRoomToDb(currentRoom);
-          break;
         }
 
-        case "video:pause":
-        case "sync:pause":
-        case "pause_video":
-        case "sync_pause": {
-          if (!canControl) return;
-          currentRoom.playing = false;
-          currentRoom.isPlaying = false;
-          if (msg.currentTime !== undefined) {
-            currentRoom.currentTime = parseFloat(msg.currentTime);
-          } else if (msg.time !== undefined) {
-            currentRoom.currentTime = parseFloat(msg.time);
-          }
-          const pauseRate = typeof msg.rate === "number" ? msg.rate : 1.0;
-          const pauseUpdatedAt = msg.updatedAt || Date.now();
-          currentRoom.lastUpdated = pauseUpdatedAt;
-          currentRoom.revision = (currentRoom.revision || 0) + 1;
-          const currentRev = currentRoom.revision;
-          const nowServerTime = Date.now();
-
-          addSystemMessage(currentRoom, `⏸ ${member.avatar} ${member.name} поставил на паузу.`, "pause", conn.userId);
-
-          broadcastToRoom(conn.roomId, {
-            type: "video:pause",
-            roomId: conn.roomId,
-            time: currentRoom.currentTime,
-            playing: false,
-            rate: pauseRate,
-            updatedAt: pauseUpdatedAt,
-            serverTime: nowServerTime,
-            revision: currentRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "sync:pause",
-            roomId: conn.roomId,
-            currentTime: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            serverTime: nowServerTime,
-            revision: currentRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "playback_change",
-            playing: false,
-            currentTime: currentRoom.currentTime,
-            serverTime: nowServerTime,
-            revision: currentRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "room_state",
-            state: { ...currentRoom, serverTime: nowServerTime },
-          });
-
-          saveRoomToDb(currentRoom);
-          break;
-        }
-
-        case "force_sync":
-        case "force_sync_all":
-          if (!canControl) return;
-          if (msg.currentTime !== undefined) {
-            currentRoom.currentTime = parseFloat(msg.currentTime);
-          }
-          currentRoom.lastUpdated = Date.now();
-          currentRoom.revision = (currentRoom.revision || 0) + 1;
-          const forceRev = currentRoom.revision;
-          const forceServerTime = Date.now();
-          const masterTime = currentRoom.currentTime;
-
-          currentRoom.chatHistory = currentRoom.chatHistory.filter(
-            (m: ChatMessage) => !(m.type === "system" && m.text.includes("перемотал"))
-          );
-
-          addSystemMessage(currentRoom, `⚡ Синхронизация: Все участники выровнены на ${Math.floor(masterTime)} сек.`, "sync", "system");
-
-          broadcastToRoom(conn.roomId, {
-            type: "apply_force_sync",
-            currentTime: masterTime,
-            serverTime: forceServerTime,
-            revision: forceRev,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "room_state",
-            state: { ...currentRoom, serverTime: forceServerTime },
-          });
-
-          saveRoomToDb(currentRoom);
-          break;
-
-        case "player:state":
-          if (!canControl) return;
-          const isPlayCommand = Boolean(msg.playing ?? (msg.state === 'playing'));
-
-          currentRoom.playing = isPlayCommand;
-          currentRoom.isPlaying = isPlayCommand;
-          if (msg.currentTime !== undefined) {
-            currentRoom.currentTime = parseFloat(msg.currentTime);
-          } else if (msg.time !== undefined) {
-            currentRoom.currentTime = parseFloat(msg.time);
-          }
-          currentRoom.lastUpdated = Date.now();
-          currentRoom.revision = (currentRoom.revision || 0) + 1;
-          const playerStateRev = currentRoom.revision;
-          const playerStateServerTime = Date.now();
-
-          addSystemMessage(
-            currentRoom,
-            currentRoom.playing
-              ? `▶️ ${member.avatar} ${member.name} включил воспроизведение.`
-              : `⏸️ ${member.avatar} ${member.name} поставил на паузу.`,
-            "playpause",
-            conn.userId
-          );
-
-          // Broadcast both new hard sync event and backward-compatible events
-          broadcastToRoom(conn.roomId, {
-            type: "player:state",
-            playing: currentRoom.playing,
-            isPlaying: currentRoom.isPlaying,
-            state: currentRoom.playing ? 'playing' : 'paused',
-            currentTime: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            serverTime: playerStateServerTime,
-            revision: playerStateRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "playback_change",
-            playing: currentRoom.playing,
-            currentTime: currentRoom.currentTime,
-            serverTime: playerStateServerTime,
-            revision: playerStateRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "room_state",
-            state: { ...currentRoom, serverTime: playerStateServerTime },
-          });
-
-          saveRoomToDb(currentRoom);
-          break;
-
-        case "video:seek":
-        case "player:seek":
-        case "sync:seek":
-        case "seek_video":
-        case "sync_seek": {
-          if (!canControl) return;
-          if (msg.currentTime !== undefined) {
-            currentRoom.currentTime = parseFloat(msg.currentTime);
-          } else if (msg.time !== undefined) {
-            currentRoom.currentTime = parseFloat(msg.time);
-          }
-          if (msg.playing !== undefined) {
-            currentRoom.playing = Boolean(msg.playing);
-            currentRoom.isPlaying = Boolean(msg.playing);
-          }
-          const seekRate = typeof msg.rate === "number" ? msg.rate : 1.0;
-          const seekUpdatedAt = msg.updatedAt || Date.now();
-          currentRoom.lastUpdated = seekUpdatedAt;
-          currentRoom.revision = (currentRoom.revision || 0) + 1;
-          const seekRev = currentRoom.revision;
-          const seekServerTime = Date.now();
-
-          addSystemMessage(currentRoom, `⏩ ${member.avatar} ${member.name} перемотал эфир.`, "seek", conn.userId);
-
-          broadcastToRoom(conn.roomId, {
-            type: "video:seek",
-            roomId: conn.roomId,
-            time: currentRoom.currentTime,
-            currentTime: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            rate: seekRate,
-            updatedAt: seekUpdatedAt,
-            serverTime: seekServerTime,
-            revision: seekRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "player:seek",
-            currentTime: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            serverTime: seekServerTime,
-            revision: seekRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "sync:seek",
-            roomId: conn.roomId,
-            time: currentRoom.currentTime,
-            currentTime: currentRoom.currentTime,
-            payload: { time: currentRoom.currentTime },
-            serverTime: seekServerTime,
-            revision: seekRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "playback_change",
-            playing: currentRoom.playing,
-            currentTime: currentRoom.currentTime,
-            serverTime: seekServerTime,
-            revision: seekRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "room_state",
-            state: { ...currentRoom, serverTime: seekServerTime },
-          });
-
-          saveRoomToDb(currentRoom);
-
-          if (isMediasoupSupported()) {
-            createPlainTransports(conn.roomId).then((ports) => {
-              startStreamSession(conn.roomId, currentRoom.videoUrl, ports, Number(msg.currentTime));
-            }).catch((err) => {
-              console.error("[SFU STREAM] Failed to seek video stream plain ports:", err);
-            });
-          }
-          break;
-        }
-
-        case "SYNC_STATE":
-        case "video:sync":
-        case "sync:state":
-        case "video_sync":
-        case "player:heartbeat":
-        case "sync_time_update":
-        case "heartbeat":
-        case "heartbeat_update": {
-          const isActualHost = (currentRoom.hostId === conn.userId) || isHost || currentRoom.anyoneCanControl;
-          if (!isActualHost) {
-            try {
-              ws.send(JSON.stringify({
-                type: "error",
-                code: 403,
-                message: "Forbidden: Only host can broadcast sync state"
-              }));
-            } catch {}
-            break;
-          }
-
-          const rawTime = msg.position !== undefined
-            ? msg.position
-            : (msg.hostTime !== undefined
-              ? msg.hostTime
-              : (msg.currentTime !== undefined
-                ? msg.currentTime
-                : (msg.time !== undefined
-                  ? msg.time
-                  : (msg.payload?.time !== undefined ? msg.payload.time : undefined))));
-          const newTime = parseFloat(rawTime);
-          if (!isNaN(newTime) && isFinite(newTime)) {
-            currentRoom.currentTime = Math.max(0, Math.min(864000, newTime));
-            currentRoom.hostTime = currentRoom.currentTime;
-          }
-
-          const rawPlaying = msg.hostPlaying !== undefined
-            ? msg.hostPlaying
-            : (msg.playing !== undefined
-              ? msg.playing
-              : (msg.isPlaying !== undefined
-                ? msg.isPlaying
-                : (msg.payload?.playing !== undefined ? msg.payload.playing : undefined)));
-          if (rawPlaying !== undefined) {
-            currentRoom.playing = Boolean(rawPlaying);
-            currentRoom.isPlaying = Boolean(rawPlaying);
-            currentRoom.hostPlaying = Boolean(rawPlaying);
-          }
-
-          if (msg.hostProvider) {
-            currentRoom.provider = msg.hostProvider;
-            currentRoom.hostProvider = msg.hostProvider;
-          }
-
-          const rawRate = typeof msg.playbackRate === "number" ? msg.playbackRate : (typeof msg.rate === "number" ? msg.rate : 1.0);
-          const rate = isFinite(rawRate) && rawRate > 0 ? Math.max(0.25, Math.min(4.0, rawRate)) : 1.0;
-          const now = typeof msg.updatedAt === "number" ? msg.updatedAt : Date.now();
-          currentRoom.lastUpdated = now;
-          currentRoom.lastHeartbeatSyncTime = now;
-          currentRoom.revision = (currentRoom.revision || 0) + 1;
-          const syncRev = currentRoom.revision;
-          const syncServerTime = Date.now();
-
-          // 1. Canonical Authoritative SYNC_STATE broadcast
-          broadcastToRoom(conn.roomId, {
-            type: "SYNC_STATE",
-            roomId: currentRoom.roomId,
-            position: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            playbackRate: rate,
-            rate: rate,
-            updatedAt: now,
-            serverTime: syncServerTime,
-            revision: syncRev,
-            senderId: conn.userId,
-          });
-
-          // 2. Primary video:sync broadcast for sub-second sync plugins
-          broadcastToRoom(conn.roomId, {
-            type: "video:sync",
-            roomId: currentRoom.roomId,
-            time: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            rate: rate,
-            updatedAt: now,
-            serverTime: syncServerTime,
-            revision: syncRev,
-            senderId: conn.userId,
-          });
-
-          // 3. sync:state broadcast with structured payload
-          broadcastToRoom(conn.roomId, {
-            type: "sync:state",
-            roomId: currentRoom.roomId,
-            time: currentRoom.currentTime,
-            currentTime: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            isPlaying: currentRoom.playing,
-            payload: {
-              time: currentRoom.currentTime,
-              playing: currentRoom.playing,
-              rate: rate,
-              ts: now,
-            },
-            serverTime: syncServerTime,
-            revision: syncRev,
-            senderId: conn.userId,
-          });
-
-          // 4. Full video sync broadcast (Host = source of truth)
-          broadcastToRoom(conn.roomId, {
-            type: "video_sync",
-            roomId: currentRoom.roomId,
-            hostTime: currentRoom.currentTime,
-            hostPlaying: currentRoom.playing,
-            hostProvider: currentRoom.provider || "youtube",
-            currentTime: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            isPlaying: currentRoom.isPlaying,
-            rate: rate,
-            updatedAt: now,
-            serverTime: syncServerTime,
-            revision: syncRev,
-            senderId: conn.userId,
-          });
-
-          // 5. Broadcast hard heartbeat to all room listeners
-          broadcastToRoom(conn.roomId, {
-            type: "player:heartbeat",
-            currentTime: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            isPlaying: currentRoom.isPlaying,
-            state: currentRoom.playing ? 'playing' : 'paused',
-            playbackRate: rate,
-            serverTime: syncServerTime,
-            revision: syncRev,
-            senderId: conn.userId,
-          });
-          break;
-        }
-
-        case "SYNC_REQUEST":
-        case "request_sync": {
-          const syncServerTime = Date.now();
-          ws.send(JSON.stringify({
-            type: "SYNC_STATE",
-            roomId: currentRoom.roomId,
-            position: currentRoom.currentTime || 0,
-            time: currentRoom.currentTime || 0,
-            playing: Boolean(currentRoom.playing || currentRoom.isPlaying),
-            playbackRate: 1.0,
-            rate: 1.0,
-            updatedAt: currentRoom.lastUpdated || syncServerTime,
-            serverTime: syncServerTime,
-            revision: currentRoom.revision || 1,
-          }));
-          break;
-        }
-
-        case "SYNC_COMMAND":
-        case "video_command":
-        case "cmd": {
+        case "SYNC_COMMAND": {
           if (!canControl) {
-            try {
-              ws.send(JSON.stringify({
-                type: "error",
-                code: 403,
-                message: "Forbidden: You are not authorized to control playback"
-              }));
-            } catch {}
+            ws.send(JSON.stringify({
+              type: "error",
+              code: 403,
+              message: "Forbidden: You are not authorized to control playback",
+            }));
             return;
           }
 
-          const cmd = msg.cmd || msg;
-          const commandName = cmd.command || cmd.type;
-          const rawCmdTime = cmd.position !== undefined ? cmd.position : (cmd.time !== undefined ? cmd.time : cmd.currentTime);
-          const parsedCmdTime = parseFloat(rawCmdTime);
-          if (!isNaN(parsedCmdTime) && isFinite(parsedCmdTime)) {
-            currentRoom.currentTime = Math.max(0, Math.min(864000, parsedCmdTime));
-            currentRoom.hostTime = currentRoom.currentTime;
+          handleSyncMessage(
+            msg,
+            { id: conn.userId, userId: conn.userId, isHost, canControl },
+            currentRoom,
+            (targetRoomId, payload) => {
+              broadcastToRoom(targetRoomId, payload);
+            }
+          );
+
+          const commandName = msg.command || msg.cmd;
+          if (commandName === 'play') {
+            addSystemMessage(currentRoom, `▶ ${member.avatar} ${member.name} включил воспроизведение.`, "play", conn.userId);
+          } else if (commandName === 'pause') {
+            addSystemMessage(currentRoom, `⏸ ${member.avatar} ${member.name} поставил на паузу.`, "pause", conn.userId);
+          } else if (commandName === 'seek') {
+            addSystemMessage(currentRoom, `⏩ ${member.avatar} ${member.name} перемотал эфир.`, "seek", conn.userId);
           }
-
-          if (commandName === "play") {
-            currentRoom.playing = true;
-            currentRoom.isPlaying = true;
-            currentRoom.hostPlaying = true;
-          } else if (commandName === "pause") {
-            currentRoom.playing = false;
-            currentRoom.isPlaying = false;
-            currentRoom.hostPlaying = false;
-          }
-
-          const rawRate = typeof cmd.playbackRate === "number" ? cmd.playbackRate : (typeof cmd.rate === "number" ? cmd.rate : 1.0);
-          const rate = isFinite(rawRate) && rawRate > 0 ? Math.max(0.25, Math.min(4.0, rawRate)) : 1.0;
-
-          currentRoom.revision = (currentRoom.revision || 0) + 1;
-          const cmdRev = currentRoom.revision;
-          const cmdServerTime = Date.now();
-          currentRoom.lastUpdated = cmdServerTime;
-
-          // Broadcast canonical command & state
-          broadcastToRoom(conn.roomId, {
-            type: "SYNC_COMMAND",
-            command: commandName,
-            roomId: currentRoom.roomId,
-            position: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            playbackRate: rate,
-            rate: rate,
-            updatedAt: cmdServerTime,
-            serverTime: cmdServerTime,
-            revision: cmdRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "SYNC_STATE",
-            roomId: currentRoom.roomId,
-            position: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            playbackRate: rate,
-            rate: rate,
-            updatedAt: cmdServerTime,
-            serverTime: cmdServerTime,
-            revision: cmdRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "video_sync",
-            roomId: currentRoom.roomId,
-            hostTime: currentRoom.currentTime,
-            hostPlaying: currentRoom.playing,
-            hostProvider: currentRoom.provider || "youtube",
-            currentTime: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            serverTime: cmdServerTime,
-            revision: cmdRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "room_state",
-            state: { ...currentRoom, serverTime: cmdServerTime },
-          });
 
           saveRoomToDb(currentRoom);
+          break;
+        }
+
+        case "SYNC_STATE": {
+          handleSyncMessage(
+            msg,
+            { id: conn.userId, userId: conn.userId, isHost, canControl },
+            currentRoom,
+            (targetRoomId, payload) => {
+              broadcastToRoom(targetRoomId, payload);
+            }
+          );
+          break;
+        }
+
+        case "SYNC_REQUEST": {
+          handleSyncMessage(
+            msg,
+            { id: conn.userId, userId: conn.userId, isHost, canControl, send: (data: string) => ws.send(data) },
+            currentRoom,
+            (targetRoomId, payload) => {
+              broadcastToRoom(targetRoomId, payload);
+            }
+          );
           break;
         }
 
@@ -2806,18 +2286,6 @@ wss.on("connection", async (ws: WebSocket, req) => {
           break;
         }
 
-        case "video:sync": {
-          broadcastToRoom(conn.roomId, {
-            type: "video:sync",
-            senderId: conn.userId,
-            currentTime: msg.currentTime,
-            playing: msg.playing,
-            driftSeconds: msg.driftSeconds || 0,
-            timestamp: Date.now()
-          });
-          break;
-        }
-
         case "poll:create": {
           if (!isHost && !effectivePerms.manageVideo) {
             ws.send(JSON.stringify({ type: "error", message: "Только создатель комнаты может запускать голосования" }));
@@ -2896,25 +2364,6 @@ wss.on("connection", async (ws: WebSocket, req) => {
           ws.send(JSON.stringify({
             type: "poll:list",
             polls
-          }));
-          break;
-        }
-
-        case "force_sync":
-        case "request_sync": {
-          // Immediately respond with the authoritative room playback status
-          ws.send(JSON.stringify({
-            type: "video_sync",
-            roomId: currentRoom.roomId,
-            hostTime: currentRoom.currentTime,
-            hostPlaying: currentRoom.playing,
-            hostProvider: currentRoom.provider || "youtube",
-            currentTime: currentRoom.currentTime,
-            time: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            isPlaying: currentRoom.isPlaying,
-            senderId: currentRoom.hostId || conn.userId,
-            timestamp: Date.now(),
           }));
           break;
         }

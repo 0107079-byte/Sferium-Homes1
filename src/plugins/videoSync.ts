@@ -957,15 +957,6 @@ export class SyncController {
       rate,
       updatedAt: now,
     });
-
-    this.sendWsMessage({
-      type: 'video:play',
-      roomId: this.roomId,
-      time,
-      playing: true,
-      rate,
-      updatedAt: now,
-    });
   }
 
   public notifyPause(): void {
@@ -985,15 +976,6 @@ export class SyncController {
       rate,
       updatedAt: now,
     });
-
-    this.sendWsMessage({
-      type: 'video:pause',
-      roomId: this.roomId,
-      time,
-      playing: false,
-      rate,
-      updatedAt: now,
-    });
   }
 
   public notifySeek(time: number): void {
@@ -1010,15 +992,6 @@ export class SyncController {
       time,
       playing: isPlaying,
       playbackRate: rate,
-      rate,
-      updatedAt: now,
-    });
-
-    this.sendWsMessage({
-      type: 'video:seek',
-      roomId: this.roomId,
-      time,
-      playing: isPlaying,
       rate,
       updatedAt: now,
     });
@@ -1228,13 +1201,13 @@ export class SyncController {
 
     const type = msg.type;
 
-    const isSyncState = type === 'SYNC_STATE' || type === 'video:sync' || type === 'sync:state' || type === 'video_sync' || type === 'player:heartbeat';
+    const isSyncState = type === 'SYNC_STATE' || type === 'room_state';
     const isCommand = type === 'SYNC_COMMAND';
-    const isPlayEvent = isCommand ? msg.command === 'play' : (type === 'video:play' || type === 'sync:play' || type === 'play_video' || type === 'sync_play');
-    const isPauseEvent = isCommand ? msg.command === 'pause' : (type === 'video:pause' || type === 'sync:pause' || type === 'pause_video' || type === 'sync_pause');
-    const isSeekEvent = isCommand ? msg.command === 'seek' : (type === 'video:seek' || type === 'sync:seek' || type === 'seek_video' || type === 'sync_seek' || type === 'player:seek');
+    const isPlayEvent = isCommand && (msg.command === 'play');
+    const isPauseEvent = isCommand && (msg.command === 'pause');
+    const isSeekEvent = isCommand && (msg.command === 'seek');
 
-    if (!isSyncState && !isCommand && !isPlayEvent && !isPauseEvent && !isSeekEvent && type !== 'player:state' && type !== 'room_state') {
+    if (!isSyncState && !isCommand) {
       return;
     }
 

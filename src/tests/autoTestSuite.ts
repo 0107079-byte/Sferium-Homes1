@@ -258,7 +258,7 @@ export async function testPeerJSMock(): Promise<TestResultItem> {
     packetSent = true;
   };
 
-  mockPeer.send({ type: 'sync:play' });
+  mockPeer.send({ type: 'SYNC_COMMAND', command: 'play' });
   if (!packetSent) {
     return { name: 'testPeerJSMock', passed: false, message: 'P2P DataChannel packet transmission failed', durationMs: performance.now() - start };
   }
@@ -299,8 +299,8 @@ export async function testWebSocketMock(): Promise<TestResultItem> {
     );
   });
 
-  // Non-host tries to send sync:play -> must be ignored
-  guestWS.send(JSON.stringify({ type: 'sync:play', roomId }));
+  // Non-host tries to send SYNC_COMMAND play -> must be ignored
+  guestWS.send(JSON.stringify({ type: 'SYNC_COMMAND', command: 'play', roomId }));
 
   if (!guestAttemptBlocked) {
     return { name: 'testWebSocketMock', passed: false, message: 'Unauthorized guest managed to trigger server video sync broadcast', durationMs: performance.now() - start };

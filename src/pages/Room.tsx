@@ -210,10 +210,21 @@ export const Room: React.FC<RoomProps> = ({
       color: currentUser.color,
     });
 
-    const unsubState = syncSocket.on('sync:state', (state: RoomState) => {
-      setRoomState(state);
-      if (typeof state.currentTime === 'number') {
-        setLocalTime(state.currentTime);
+    const unsubSyncState = syncSocket.on('SYNC_STATE', (data: any) => {
+      const pos = data.position !== undefined ? data.position : data.time;
+      const isPlay = data.playing !== undefined ? data.playing : data.isPlaying;
+      setRoomState((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          hostTime: pos,
+          hostPlaying: isPlay,
+          currentTime: pos !== undefined ? pos : prev.currentTime,
+          playing: isPlay !== undefined ? isPlay : prev.playing,
+        };
+      });
+      if (typeof pos === 'number') {
+        setLocalTime(pos);
       }
     });
 
@@ -224,20 +235,6 @@ export const Room: React.FC<RoomProps> = ({
           setLocalTime(data.state.currentTime);
         }
       }
-    });
-
-    const unsubVideoSync = syncSocket.on('video_sync', (data: any) => {
-      setRoomState((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          hostTime: data.hostTime,
-          hostPlaying: data.hostPlaying,
-          hostProvider: data.hostProvider || prev.provider,
-          currentTime: data.hostTime !== undefined ? data.hostTime : prev.currentTime,
-          playing: data.hostPlaying !== undefined ? data.hostPlaying : prev.playing,
-        };
-      });
     });
 
     const unsubChat = syncSocket.on('chat_broadcast', (data: SocketMessage) => {
@@ -286,9 +283,8 @@ export const Room: React.FC<RoomProps> = ({
     });
 
     return () => {
-      unsubState();
+      unsubSyncState();
       unsubRoomState();
-      unsubVideoSync();
       unsubChat();
       unsubKick();
       unsubBan();

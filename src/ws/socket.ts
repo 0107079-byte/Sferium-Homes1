@@ -4,24 +4,17 @@
  */
 
 export type SocketEventType =
-  | 'player:state'
-  | 'player:seek'
-  | 'player:heartbeat'
-  | 'sync:video_url'
-  | 'sync:play'
-  | 'sync:pause'
-  | 'sync:seek'
-  | 'sync:state'
-  | 'sync:heartbeat'
-  | 'heartbeat_sync'
+  | 'SYNC_COMMAND'
+  | 'SYNC_STATE'
+  | 'SYNC_REQUEST'
   | 'room_state'
+  | 'change_video'
   | 'chat_message'
   | 'chat_broadcast'
   | 'react_message'
   | 'kick_user'
   | 'transfer_host'
   | 'toggle_control_mode'
-  | 'force_sync'
   | 'voice:join'
   | 'voice:leave'
   | 'voice:peers_list'
@@ -157,10 +150,6 @@ export class SyncSocket {
         this.emit(data.type, data);
       }
       this.emit('*', data);
-
-      if (data.type === 'room_state') {
-        this.emit('sync:state', data.state || data);
-      }
     } catch (err) {
       console.error('[SyncSocket] Failed to parse message:', err, event.data);
     }
@@ -222,170 +211,106 @@ export class SyncSocket {
     }
   }
 
+  /**
+   * Request initial / catch-up sync state from server
+   */
   public requestSync() {
     this.send({
-      type: 'request_sync',
+      type: 'SYNC_REQUEST',
       roomId: this.roomId,
       userId: this.userId,
       timestamp: Date.now(),
     });
   }
 
-  // --- HARD SYNCHRONIZATION EVENT EMITTERS ---
-
   /**
-   * Emit player:state when remote toggles Play / Pause
+   * Send playback command (play, pause, seek, rate)
    */
-  public sendPlayerState(payload: {
-    playing: boolean;
-    currentTime: number;
-    state?: 'playing' | 'paused';
+  public sendSyncCommand(payload: {
+    command: 'play' | 'pause' | 'seek' | 'rate';
+    position?: number;
+    playing?: boolean;
     playbackRate?: number;
   }) {
     this.send({
-      type: 'player:state',
+      type: 'SYNC_COMMAND',
+      roomId: this.roomId,
+      command: payload.command,
+      position: payload.position,
+      currentTime: payload.position,
       playing: payload.playing,
-      isPlaying: payload.playing,
-      state: payload.state || (payload.playing ? 'playing' : 'paused'),
-      currentTime: payload.currentTime,
-      time: payload.currentTime,
-      playbackRate: payload.playbackRate || 1,
+      playbackRate: payload.playbackRate,
       timestamp: Date.now(),
     });
   }
 
   /**
-   * Emit player:seek when remote timeline seeks
+   * Send authoritative host state heartbeat
    */
-  public sendPlayerSeek(currentTime: number, playing?: boolean) {
-    this.send({
-      type: 'player:seek',
-      currentTime,
-      time: currentTime,
-      playing: playing !== undefined ? playing : undefined,
-      timestamp: Date.now(),
-    });
-  }
-
-  /**
-   * Emit periodic player:heartbeat from remote master clock
-   */
-  public sendPlayerHeartbeat(payload: {
-    currentTime: number;
-    time?: number;
+  public sendSyncState(payload: {
+    position: number;
     playing: boolean;
-    isPlaying?: boolean;
-    state?: 'playing' | 'paused';
     playbackRate?: number;
   }) {
     this.send({
-      type: 'player:heartbeat',
-      currentTime: payload.currentTime,
-      time: payload.currentTime,
+      type: 'SYNC_STATE',
+      roomId: this.roomId,
+      position: payload.position,
+      currentTime: payload.position,
       playing: payload.playing,
-      isPlaying: payload.isPlaying !== undefined ? payload.isPlaying : payload.playing,
-      state: payload.state || (payload.playing ? 'playing' : 'paused'),
-      playbackRate: payload.playbackRate || 1,
+      playbackRate: payload.playbackRate || 1.0,
       timestamp: Date.now(),
-    });
-    // Also send heartbeat_update for server compatibility
-    this.send({
-      type: 'heartbeat_update',
-      currentTime: payload.currentTime,
-      playing: payload.playing,
     });
   }
 
   /**
-   * Send single unified video sync packet from Host (Host = Source of Truth)
-   * Sends every 750ms: hostTime, hostPlaying, hostProvider with zero packet duplication
+   * Convenience helpers for components
    */
+  public sendPlay(currentTime?: number) {
+    this.sendSyncCommand({
+      command: 'play',
+      position: currentTime,
+      playing: true,
+    });
+  }
+
+  public sendPause(currentTime?: number) {
+    this.sendSyncCommand({
+      command: 'pause',
+      position: currentTime,
+      playing: false,
+    });
+  }
+
+  public sendSeek(currentTime: number) {
+    this.sendSyncCommand({
+      command: 'seek',
+      position: currentTime,
+    });
+  }
+
   public sendVideoSync(payload: {
     hostTime: number;
     hostPlaying: boolean;
-    hostProvider: string;
+    hostProvider?: string;
     rate?: number;
     playbackRate?: number;
     roomId?: string;
   }) {
-    this.send({
-      type: 'video_sync',
-      roomId: payload.roomId || this.roomId,
-      hostTime: payload.hostTime,
-      hostPlaying: payload.hostPlaying,
-      hostProvider: payload.hostProvider,
-      currentTime: payload.hostTime,
+    this.sendSyncState({
+      position: payload.hostTime,
       playing: payload.hostPlaying,
-      isPlaying: payload.hostPlaying,
-      rate: payload.rate || payload.playbackRate || 1.0,
       playbackRate: payload.rate || payload.playbackRate || 1.0,
-      timestamp: Date.now(),
     });
   }
 
-  /**
-   * Send clean video commands { cmd: { type: "play" | "pause" | "seek", time?: number } }
-   */
-  public sendSyncCommand(cmd: { type: 'play' } | { type: 'pause' } | { type: 'seek'; time?: number }) {
-    if (cmd.type === 'play') {
-      this.sendPlay(undefined);
-    } else if (cmd.type === 'pause') {
-      this.sendPause(undefined);
-    } else if (cmd.type === 'seek' && typeof cmd.time === 'number') {
-      this.sendSeek(cmd.time);
-    }
-  }
-
-  // --- STANDARD / BACKWARD COMPATIBLE METHODS ---
   public sendVideoUrl(url: string, provider?: string, videoId?: string) {
-    this.send({
-      type: 'sync:video_url',
-      videoUrl: url,
-      provider,
-      videoId,
-      timestamp: Date.now(),
-    });
     this.send({
       type: 'change_video',
       videoUrl: url,
       provider,
       videoId,
-    });
-  }
-
-  public sendPlay(currentTime?: number) {
-    this.send({
-      type: 'sync:play',
-      currentTime,
       timestamp: Date.now(),
-    });
-    this.send({
-      type: 'play_video',
-      currentTime,
-    });
-  }
-
-  public sendPause(currentTime?: number) {
-    this.send({
-      type: 'sync:pause',
-      currentTime,
-      timestamp: Date.now(),
-    });
-    this.send({
-      type: 'pause_video',
-      currentTime,
-    });
-  }
-
-  public sendSeek(currentTime: number) {
-    this.send({
-      type: 'sync:seek',
-      currentTime,
-      timestamp: Date.now(),
-    });
-    this.send({
-      type: 'seek_video',
-      currentTime,
     });
   }
 
