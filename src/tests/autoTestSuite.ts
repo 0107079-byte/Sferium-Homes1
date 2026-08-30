@@ -1,6 +1,10 @@
-import { initVideoSync, SyncVideoClient } from '../sync/syncVideoClient';
 import { handleSyncMessage } from '../../backend/syncVideoServer';
-import { startAutoSync } from '../utils/AutoSync';
+import {
+  VideoSyncPlugin,
+  wrapAsUnifiedPlayer,
+  applySync,
+  UnifiedPlayer,
+} from '../plugins/videoSync';
 import {
   createMockWebSocketPair,
   createMockVideoElement,
@@ -48,42 +52,38 @@ export async function testYouTubeSync(): Promise<TestResultItem> {
   const hostYT = createMockYouTubePlayer();
   const guestYT = createMockYouTubePlayer();
 
-  const hostSync = initVideoSync({
-    roomId,
-    ws: hostWS,
-    getVideoElement: () => null,
-    getYouTubePlayer: () => hostYT,
-    getVKPlayer: () => null,
-  });
+  const hostUnified = wrapAsUnifiedPlayer(hostYT);
+  const guestUnified = wrapAsUnifiedPlayer(guestYT);
 
-  initVideoSync({
-    roomId,
-    ws: guestWS,
-    getVideoElement: () => null,
-    getYouTubePlayer: () => guestYT,
-    getVKPlayer: () => null,
-  });
+  const hostPlugin = new VideoSyncPlugin(hostUnified, hostWS as any, true, roomId);
+  const guestPlugin = new VideoSyncPlugin(guestUnified, guestWS as any, false, roomId);
+
+  hostPlugin.start();
+  guestPlugin.start();
 
   // Action 1: Host plays
   hostYT.playVideo();
-  hostSync.sendPlay();
+  hostPlugin.notifyPlay();
   if (!guestYT.isPlaying) {
     return { name: 'testYouTubeSync', passed: false, message: 'Guest YouTube player did not start playing on host play', durationMs: performance.now() - start };
   }
 
   // Action 2: Host seeks to 45.5s
   hostYT.seekTo(45.5);
-  hostSync.sendSeek(45.5);
+  hostPlugin.notifySeek(45.5);
   if (guestYT.getCurrentTime() !== 45.5) {
     return { name: 'testYouTubeSync', passed: false, message: `Guest YouTube seek mismatch: expected 45.5, got ${guestYT.getCurrentTime()}`, durationMs: performance.now() - start };
   }
 
   // Action 3: Host pauses
   hostYT.pauseVideo();
-  hostSync.sendPause();
+  hostPlugin.notifyPause();
   if (guestYT.isPlaying) {
     return { name: 'testYouTubeSync', passed: false, message: 'Guest YouTube player did not pause on host pause', durationMs: performance.now() - start };
   }
+
+  hostPlugin.stop();
+  guestPlugin.stop();
 
   return { name: 'testYouTubeSync', passed: true, durationMs: performance.now() - start };
 }
@@ -111,42 +111,38 @@ export async function testVKSync(): Promise<TestResultItem> {
   const hostVK = createMockVKPlayer();
   const guestVK = createMockVKPlayer();
 
-  const hostSync = initVideoSync({
-    roomId,
-    ws: hostWS,
-    getVideoElement: () => null,
-    getYouTubePlayer: () => null,
-    getVKPlayer: () => hostVK,
-  });
+  const hostUnified = wrapAsUnifiedPlayer(hostVK);
+  const guestUnified = wrapAsUnifiedPlayer(guestVK);
 
-  initVideoSync({
-    roomId,
-    ws: guestWS,
-    getVideoElement: () => null,
-    getYouTubePlayer: () => null,
-    getVKPlayer: () => guestVK,
-  });
+  const hostPlugin = new VideoSyncPlugin(hostUnified, hostWS as any, true, roomId);
+  const guestPlugin = new VideoSyncPlugin(guestUnified, guestWS as any, false, roomId);
+
+  hostPlugin.start();
+  guestPlugin.start();
 
   // Play
   hostVK.play();
-  hostSync.sendPlay();
+  hostPlugin.notifyPlay();
   if (!guestVK.isPlaying) {
     return { name: 'testVKSync', passed: false, message: 'Guest VK player did not play', durationMs: performance.now() - start };
   }
 
   // Seek
   hostVK.seekTo(120);
-  hostSync.sendSeek(120);
+  hostPlugin.notifySeek(120);
   if (guestVK.getCurrentTime() !== 120) {
     return { name: 'testVKSync', passed: false, message: `Guest VK seek mismatch: ${guestVK.getCurrentTime()} vs 120`, durationMs: performance.now() - start };
   }
 
   // Pause
   hostVK.pause();
-  hostSync.sendPause();
+  hostPlugin.notifyPause();
   if (guestVK.isPlaying) {
     return { name: 'testVKSync', passed: false, message: 'Guest VK player did not pause', durationMs: performance.now() - start };
   }
+
+  hostPlugin.stop();
+  guestPlugin.stop();
 
   return { name: 'testVKSync', passed: true, durationMs: performance.now() - start };
 }
@@ -174,41 +170,43 @@ export async function testHTML5Sync(): Promise<TestResultItem> {
   const hostVideo: any = createMockVideoElement();
   const guestVideo: any = createMockVideoElement();
 
-  const hostSync = initVideoSync({
-    roomId,
-    ws: hostWS,
-    getVideoElement: () => hostVideo,
-    getYouTubePlayer: () => null,
-    getVKPlayer: () => null,
-  });
+  const hostUnified = wrapAsUnifiedPlayer(hostVideo);
+  const guestUnified = wrapAsUnifiedPlayer(guestVideo);
 
-  initVideoSync({
-    roomId,
-    ws: guestWS,
-    getVideoElement: () => guestVideo,
-    getYouTubePlayer: () => null,
-    getVKPlayer: () => null,
-  });
+  const hostPlugin = new VideoSyncPlugin(hostUnified, hostWS as any, true, roomId);
+  const guestPlugin = new VideoSyncPlugin(guestUnified, guestWS as any, false, roomId);
+
+  hostPlugin.start();
+  guestPlugin.start();
 
   // Play
   await hostVideo.play();
-  hostSync.sendPlay();
+  hostPlugin.notifyPlay();
   if (guestVideo.paused) {
     return { name: 'testHTML5Sync', passed: false, message: 'Guest HTML5 video did not start playing', durationMs: performance.now() - start };
   }
 
   // Seek
   hostVideo.currentTime = 88;
-  hostSync.sendSeek(88);
+  hostPlugin.notifySeek(88);
   if (guestVideo.currentTime !== 88) {
     return { name: 'testHTML5Sync', passed: false, message: `Guest HTML5 currentTime mismatch: ${guestVideo.currentTime}`, durationMs: performance.now() - start };
   }
 
-  // Drift auto-correction via sendState
-  hostSync.sendState(150, true);
+  // SYNC_STATE state broadcast
+  hostWS.send(JSON.stringify({
+    type: 'SYNC_STATE',
+    position: 150,
+    playing: true,
+    roomId,
+  }));
+
   if (Math.abs(guestVideo.currentTime - 150) > 0.1 || guestVideo.paused) {
     return { name: 'testHTML5Sync', passed: false, message: 'Guest HTML5 did not adjust drift to 150s with state isPlaying=true', durationMs: performance.now() - start };
   }
+
+  hostPlugin.stop();
+  guestPlugin.stop();
 
   return { name: 'testHTML5Sync', passed: true, durationMs: performance.now() - start };
 }
@@ -424,44 +422,38 @@ export async function testRutubeSync(): Promise<TestResultItem> {
   const hostRutube = createMockRutubePlayer();
   const guestRutube = createMockRutubePlayer();
 
-  const hostSync = initVideoSync({
-    roomId,
-    ws: hostWS,
-    getVideoElement: () => null,
-    getYouTubePlayer: () => null,
-    getVKPlayer: () => null,
-    getRutubePlayer: () => hostRutube,
-  });
+  const hostUnified = wrapAsUnifiedPlayer(hostRutube);
+  const guestUnified = wrapAsUnifiedPlayer(guestRutube);
 
-  initVideoSync({
-    roomId,
-    ws: guestWS,
-    getVideoElement: () => null,
-    getYouTubePlayer: () => null,
-    getVKPlayer: () => null,
-    getRutubePlayer: () => guestRutube,
-  });
+  const hostPlugin = new VideoSyncPlugin(hostUnified, hostWS as any, true, roomId);
+  const guestPlugin = new VideoSyncPlugin(guestUnified, guestWS as any, false, roomId);
+
+  hostPlugin.start();
+  guestPlugin.start();
 
   // Play
   hostRutube.play();
-  hostSync.sendPlay();
+  hostPlugin.notifyPlay();
   if (!guestRutube.isPlaying) {
     return { name: 'testRutubeSync', passed: false, message: 'Guest Rutube player did not play', durationMs: performance.now() - start };
   }
 
   // Seek
   hostRutube.seekTo(250);
-  hostSync.sendSeek(250);
+  hostPlugin.notifySeek(250);
   if (guestRutube.getCurrentTime() !== 250) {
     return { name: 'testRutubeSync', passed: false, message: `Guest Rutube seek mismatch: ${guestRutube.getCurrentTime()} vs 250`, durationMs: performance.now() - start };
   }
 
   // Pause
   hostRutube.pause();
-  hostSync.sendPause();
+  hostPlugin.notifyPause();
   if (guestRutube.isPlaying) {
     return { name: 'testRutubeSync', passed: false, message: 'Guest Rutube player did not pause', durationMs: performance.now() - start };
   }
+
+  hostPlugin.stop();
+  guestPlugin.stop();
 
   return { name: 'testRutubeSync', passed: true, durationMs: performance.now() - start };
 }
@@ -471,46 +463,42 @@ export async function testRutubeSync(): Promise<TestResultItem> {
  */
 export async function testAutoSyncDrift(): Promise<TestResultItem> {
   const start = performance.now();
-  let seekTarget = 0;
 
-  const mockPlayer = {
-    currentTime: 10,
-    getCurrentTime: () => mockPlayer.currentTime,
-    seekTo: (t: number) => {
-      mockPlayer.currentTime = t;
-      seekTarget = t;
-    },
-    isPlaying: () => true,
+  const mockPlayer: UnifiedPlayer = {
     play: () => {},
     pause: () => {},
+    seekTo: (t: number) => {
+      currentTime = t;
+    },
+    getCurrentTime: () => currentTime,
+    getDuration: () => 1000,
+    setPlaybackRate: () => {},
+    getPlaybackRate: () => 1.0,
+    isPlaying: () => true,
+    isReady: () => true,
   };
 
-  const client = new SyncVideoClient({
-    roomId: 'DRIFT_TEST',
-    userId: 'guest_drift',
-    isHost: false,
-    send: () => {},
-  });
+  let currentTime = 10;
 
-  // Test hard correction when drift > 0.7s
-  client.applyHostState(mockPlayer, { time: 15.5, playing: true });
-  if (mockPlayer.currentTime !== 15.5) {
+  // Test hard correction when drift > 0.35s
+  applySync(mockPlayer, 10, 15.5, true, true, 1.0, 1.0, Date.now());
+  if (currentTime !== 15.5) {
     return {
       name: 'testAutoSyncDrift',
       passed: false,
-      message: `Drift correction failed: expected 15.5s, got ${mockPlayer.currentTime}s`,
+      message: `Drift correction failed: expected 15.5s, got ${currentTime}s`,
       durationMs: performance.now() - start,
     };
   }
 
-  // Test tolerance when drift <= 0.7s (no seek)
-  mockPlayer.currentTime = 15.2;
-  client.applyHostState(mockPlayer, { time: 15.4, playing: true });
-  if (mockPlayer.currentTime !== 15.2) {
+  // Test tolerance when drift <= 0.05s (no seek)
+  currentTime = 15.2;
+  applySync(mockPlayer, 15.2, 15.22, true, true, 1.0, 1.0, Date.now());
+  if (currentTime !== 15.2) {
     return {
       name: 'testAutoSyncDrift',
       passed: false,
-      message: 'Tolerance failed: small drift under 0.7s triggered unnecessary seek',
+      message: 'Tolerance failed: small drift under threshold triggered unnecessary seek',
       durationMs: performance.now() - start,
     };
   }

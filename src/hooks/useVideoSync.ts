@@ -1,8 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { RoomState, VideoProvider } from '../types';
+import { VideoProvider, SyncStatusInfo } from '../types';
 import { syncSocket } from '../ws/socket';
-import { autoSyncEngine, AutoSyncState } from '../utils/AutoSync';
-import { SyncVideoClient } from '../sync/syncVideoClient';
+import { wrapAsUnifiedPlayer, applySync } from '../plugins/videoSync';
 
 export interface UseVideoSyncOptions {
   roomId: string;
@@ -12,7 +11,7 @@ export interface UseVideoSyncOptions {
   provider?: VideoProvider;
   currentTime?: number;
   playing?: boolean;
-  driftThreshold?: number; // default 0.6s
+  driftThreshold?: number; // default 0.35s
   sendWebSocketMessage?: (msg: any) => void;
   onSyncSeek?: (time: number) => void;
   onSyncPlay?: () => void;
@@ -27,7 +26,7 @@ export interface UseVideoSyncReturn {
   drift: number;
   isSynced: boolean;
   syncStatus: 'synced' | 'catching_up' | 'buffering' | 'drift_detected';
-  autoSyncStats: AutoSyncState;
+  autoSyncStats: SyncStatusInfo;
   sendPlay: () => void;
   sendPause: () => void;
   sendSeek: (time: number) => void;
@@ -43,8 +42,8 @@ export interface UseVideoSyncReturn {
 
 /**
  * useVideoSync Hook
- * Handles robust multi-participant synchronization with drift correction,
- * network jitter smoothing, provider-specific execution, and dual WebSocket/P2P channel support.
+ * Authoritative client-side sync hook operating solely via the unified protocol:
+ * SYNC_COMMAND, SYNC_STATE, SYNC_REQUEST.
  */
 export function useVideoSync({
   roomId,
@@ -54,14 +53,12 @@ export function useVideoSync({
   provider = 'youtube',
   currentTime = 0,
   playing = false,
-  driftThreshold = 0.6,
+  driftThreshold = 0.35,
   sendWebSocketMessage,
   onSyncSeek,
   onSyncPlay,
   onSyncPause,
 }: UseVideoSyncOptions): UseVideoSyncReturn {
-  const clientRef = useRef<SyncVideoClient | null>(null);
-
   const [currentTimelineTime, setCurrentTimelineTime] = useState<number>(currentTime);
   const [currentIsPlaying, setCurrentIsPlaying] = useState<boolean>(playing);
 
@@ -75,25 +72,16 @@ export function useVideoSync({
     lastUpdated: Date.now(),
   });
 
-  const [autoSyncStats, setAutoSyncStats] = useState<AutoSyncState>(autoSyncEngine.getStatus());
+  const [autoSyncStats, setAutoSyncStats] = useState<SyncStatusInfo>({
+    isSyncing: false,
+    driftSeconds: 0,
+    latencyMs: 0,
+    lastSyncedAt: Date.now(),
+    serverTime: Date.now(),
+    localTime: currentTime,
+  });
 
-  // Initialize SyncVideoClient instance
-  useEffect(() => {
-    clientRef.current = new SyncVideoClient({
-      roomId,
-      userId,
-      isHost,
-      send: sendWebSocketMessage || ((msg) => syncSocket.send(msg)),
-    });
-  }, [roomId, userId, isHost, sendWebSocketMessage]);
-
-  // Subscribe to AutoSync status updates
-  useEffect(() => {
-    const unsub = autoSyncEngine.subscribe((status) => {
-      setAutoSyncStats(status);
-    });
-    return unsub;
-  }, []);
+  const syncTimeoutRef = useRef<any>(null);
 
   // Sync WebSocket listeners
   useEffect(() => {
@@ -122,7 +110,23 @@ export function useVideoSync({
       setCurrentIsPlaying(isPlay);
 
       if (!isHost) {
-        autoSyncEngine.reportPlaybackTime(currentTime, computedHostTime, isPlay);
+        const driftSec = Math.abs(computedHostTime - currentTime);
+        const isOutOfSync = driftSec > driftThreshold;
+        setAutoSyncStats({
+          isSyncing: isOutOfSync,
+          driftSeconds: Math.round(driftSec * 100) / 100,
+          latencyMs: Math.round(driftSec * 1000),
+          lastSyncedAt: isOutOfSync ? Date.now() : now,
+          serverTime: data.serverTime || now,
+          localTime: currentTime,
+        });
+
+        if (isOutOfSync) {
+          if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+          syncTimeoutRef.current = setTimeout(() => {
+            setAutoSyncStats((prev) => ({ ...prev, isSyncing: false, lastSyncedAt: Date.now() }));
+          }, 1000);
+        }
       }
     };
 
@@ -157,8 +161,9 @@ export function useVideoSync({
     return () => {
       unsubSyncState();
       unsubSyncCommand();
+      if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
     };
-  }, [roomId, isHost, currentTime, onSyncPlay, onSyncPause, onSyncSeek]);
+  }, [roomId, isHost, currentTime, driftThreshold, onSyncPlay, onSyncPause, onSyncSeek]);
 
   // Compute calculated drift
   const localTarget = isHost ? currentTime : syncedState.hostTime;
@@ -172,11 +177,13 @@ export function useVideoSync({
     syncStatus = 'drift_detected';
   }
 
-  // Host Pulse Sender (750ms interval optimal for real-time rooms)
   const sendSyncPulse = useCallback(
     (currTime: number, isPlay: boolean) => {
       if (!isHost && !canControl) return;
-      clientRef.current?.hostBroadcast(currTime, isPlay);
+      syncSocket.sendSyncState({
+        position: currTime,
+        playing: isPlay,
+      });
     },
     [isHost, canControl]
   );
@@ -184,8 +191,15 @@ export function useVideoSync({
   const sendSeekCommand = useCallback(
     (time: number) => {
       if (!canControl) return;
-      clientRef.current?.sendSeek(time);
-      autoSyncEngine.markManualSync(time);
+      syncSocket.sendSeek(time);
+      setAutoSyncStats((prev) => ({
+        ...prev,
+        isSyncing: true,
+        driftSeconds: 0,
+        latencyMs: 15,
+        lastSyncedAt: Date.now(),
+        localTime: time,
+      }));
     },
     [canControl]
   );
@@ -193,7 +207,7 @@ export function useVideoSync({
   const sendPlayCommand = useCallback(
     (time?: number) => {
       if (!canControl) return;
-      clientRef.current?.sendPlay(time);
+      syncSocket.sendPlay(time);
     },
     [canControl]
   );
@@ -201,7 +215,7 @@ export function useVideoSync({
   const sendPauseCommand = useCallback(
     (time?: number) => {
       if (!canControl) return;
-      clientRef.current?.sendPause(time);
+      syncSocket.sendPause(time);
     },
     [canControl]
   );
@@ -209,15 +223,33 @@ export function useVideoSync({
   const sendStateCommand = useCallback(
     (time: number, isPlaying: boolean) => {
       if (!canControl) return;
-      clientRef.current?.hostBroadcast(time, isPlaying);
+      syncSocket.sendSyncState({
+        position: time,
+        playing: isPlaying,
+      });
     },
     [canControl]
   );
 
   const setVideoStateFromServer = useCallback((payload: any, player: any) => {
-    clientRef.current?.applyHostState(player, payload);
-    if (payload?.time !== undefined) setCurrentTimelineTime(payload.time);
-    if (payload?.playing !== undefined) setCurrentIsPlaying(payload.playing);
+    if (!player) return;
+    const hostTime = typeof payload?.time === 'number' ? payload.time : (typeof payload?.position === 'number' ? payload.position : 0);
+    const hostPlaying = Boolean(payload?.playing !== undefined ? payload.playing : payload?.isPlaying);
+    const hostRate = typeof payload?.playbackRate === 'number' ? payload.playbackRate : 1.0;
+
+    const unified = wrapAsUnifiedPlayer(player);
+    const localTime = unified.getCurrentTime();
+    const localPlaying = typeof unified.isPlaying === 'function' ? unified.isPlaying() : false;
+    const localRate = unified.getPlaybackRate();
+
+    applySync(unified, localTime, hostTime, localPlaying, hostPlaying, localRate, hostRate, payload?.updatedAt || payload?.ts);
+
+    if (payload?.time !== undefined || payload?.position !== undefined) {
+      setCurrentTimelineTime(hostTime);
+    }
+    if (payload?.playing !== undefined || payload?.isPlaying !== undefined) {
+      setCurrentIsPlaying(hostPlaying);
+    }
   }, []);
 
   const sendForceSync = useCallback(() => {
@@ -237,10 +269,10 @@ export function useVideoSync({
     isSynced,
     syncStatus,
     autoSyncStats,
-    sendPlay: () => (clientRef.current ? clientRef.current.sendPlay() : sendPlayCommand()),
-    sendPause: () => (clientRef.current ? clientRef.current.sendPause() : sendPauseCommand()),
-    sendSeek: (t: number) => (clientRef.current ? clientRef.current.sendSeek(t) : sendSeekCommand(t)),
-    sendState: (t: number, p: boolean) => (clientRef.current ? clientRef.current.hostBroadcast(t, p) : sendStateCommand(t, p)),
+    sendPlay: () => sendPlayCommand(),
+    sendPause: () => sendPauseCommand(),
+    sendSeek: (t: number) => sendSeekCommand(t),
+    sendState: (t: number, p: boolean) => sendStateCommand(t, p),
     setVideoStateFromServer,
     sendSyncPulse,
     sendSeekCommand,
@@ -252,4 +284,3 @@ export function useVideoSync({
 }
 
 export default useVideoSync;
-

@@ -110,7 +110,7 @@ export class SyncEngine {
       }
     });
 
-    syncSocket.on('sync:video_url', (data: SocketMessage) => {
+    syncSocket.on('change_video', (data: SocketMessage) => {
       if (data.videoUrl) {
         this.handleVideoChange(data.videoUrl);
       }

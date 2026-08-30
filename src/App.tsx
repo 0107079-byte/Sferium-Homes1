@@ -508,14 +508,19 @@ export function App() {
             };
           });
           setLocalTime(0);
-        } else if (message.type === "playback_change") {
-          setRoomState((prev) => prev ? { ...prev, playing: message.playing, currentTime: message.currentTime ?? prev.currentTime } : null);
-          if (message.playing) playerRef.current?.play();
-          else playerRef.current?.pause();
-        } else if (message.type === "sync_seek") {
-          setRoomState((prev) => prev ? { ...prev, currentTime: message.currentTime } : null);
-          setLocalTime(message.currentTime);
-          playerRef.current?.seekTo(message.currentTime);
+        } else if (message.type === "SYNC_COMMAND") {
+          const pos = message.position !== undefined ? message.position : message.currentTime;
+          if (message.command === "play") {
+            setRoomState((prev) => prev ? { ...prev, playing: true, currentTime: pos ?? prev.currentTime } : null);
+            playerRef.current?.play();
+          } else if (message.command === "pause") {
+            setRoomState((prev) => prev ? { ...prev, playing: false, currentTime: pos ?? prev.currentTime } : null);
+            playerRef.current?.pause();
+          } else if (message.command === "seek" && typeof pos === "number") {
+            setRoomState((prev) => prev ? { ...prev, currentTime: pos } : null);
+            setLocalTime(pos);
+            playerRef.current?.seekTo(pos);
+          }
         } else if (message.type === "chat_message") {
           setRoomState((prev) => prev ? { ...prev, chatHistory: [...prev.chatHistory, message.message] } : null);
         }
@@ -1212,8 +1217,9 @@ export function App() {
 
     if (broadcastChannelRef.current) {
       broadcastChannelRef.current.postMessage({
-        type: "sync_seek",
-        currentTime: time,
+        type: "SYNC_COMMAND",
+        command: "seek",
+        position: time,
       });
     }
 

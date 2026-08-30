@@ -43,7 +43,6 @@ import { VideoGrid } from '../components/VideoGrid';
 import { RoleBadge } from '../components/RoleBadge';
 import { UserRoleMenu } from '../components/UserRoleMenu';
 import { RoleManager } from '../components/RoleManager';
-import { initVideoSync } from '../sync/syncVideoClient';
 import { useVideoSync } from '../hooks/useVideoSync';
 import { livekitSync } from '../livekit/livekitSync';
 import { p2pSync } from '../p2p/p2pSync';

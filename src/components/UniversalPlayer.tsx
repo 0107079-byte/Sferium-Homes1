@@ -2,9 +2,7 @@ import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef, us
 import { Play, Maximize } from 'lucide-react';
 import { VideoProvider } from '../types';
 import { extractVideoId } from '../utils/extractVideoId';
-import { seekSafe, syncEngine, PlayerAdapter } from '../modules/sync';
-import { syncSocket } from '../ws/socket';
-import { VideoSyncPlugin, UnifiedPlayer } from '../plugins/videoSync';
+import { VideoSyncPlugin, UnifiedPlayer, PlayerAdapter } from '../plugins/videoSync';
 
 export interface UniversalPlayerRef extends PlayerAdapter {
   getCurrentTime: () => number;
@@ -202,15 +200,6 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
   };
 
   useImperativeHandle(ref, () => playerAdapter, [isPlayerReady, internalTime, sendIframeCommand, provider]);
-
-  // Bind player to sync engine
-  useEffect(() => {
-    syncEngine.bindPlayer(playerAdapter);
-    syncEngine.setMaster(isHost);
-    return () => {
-      syncEngine.bindPlayer(null);
-    };
-  }, [internalTime, isPlayerReady, sendIframeCommand, isHost, provider]);
 
   // Mark player as ready on URL mount
   useEffect(() => {

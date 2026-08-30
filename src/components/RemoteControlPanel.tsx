@@ -16,8 +16,6 @@ import {
   Activity
 } from "lucide-react";
 import { RoomState } from "../types";
-import { heartbeatManager } from "../modules/heartbeat";
-import { syncEngine } from "../modules/sync";
 
 interface RemoteControlPanelProps {
   roomState: RoomState | null;

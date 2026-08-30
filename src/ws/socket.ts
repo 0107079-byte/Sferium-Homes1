@@ -1,6 +1,6 @@
 /**
  * WebSocket client manager for Sferium Homes Sync
- * Supports player:state, player:seek, player:heartbeat hard-synchronization
+ * Supports unified SYNC_COMMAND, SYNC_STATE, SYNC_REQUEST video synchronization
  */
 
 export type SocketEventType =

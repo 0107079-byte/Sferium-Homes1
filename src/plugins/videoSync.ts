@@ -926,17 +926,6 @@ export class SyncController {
         updatedAt: now,
         serverTime: now,
       });
-
-      // Backward compatible video:sync message
-      this.sendWsMessage({
-        type: 'video:sync',
-        roomId: this.roomId,
-        time: currentTime,
-        playing: isPlaying,
-        rate: rate,
-        updatedAt: now,
-        serverTime: now,
-      });
     }, 500);
   }
 
