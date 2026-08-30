@@ -304,6 +304,8 @@ export class SyncSocket {
     hostTime: number;
     hostPlaying: boolean;
     hostProvider: string;
+    rate?: number;
+    playbackRate?: number;
     roomId?: string;
   }) {
     this.send({
@@ -315,6 +317,8 @@ export class SyncSocket {
       currentTime: payload.hostTime,
       playing: payload.hostPlaying,
       isPlaying: payload.hostPlaying,
+      rate: payload.rate || payload.playbackRate || 1.0,
+      playbackRate: payload.rate || payload.playbackRate || 1.0,
       timestamp: Date.now(),
     });
   }

@@ -81,13 +81,7 @@ export class P2PSyncController {
       }
     });
 
-    // Fallback: If no P2P connections are established, fallback to WebSocket
-    if (!sentP2P && this.fallbackWs) {
-      const jsonStr = JSON.stringify(packet);
-      if (typeof this.fallbackWs.send === 'function') {
-        this.fallbackWs.send(jsonStr);
-      }
-    }
+    // Do not fall back to WebSocket for video playback synchronization, as VideoSyncPlugin manages the authoritative WebSocket sync channel.
   }
 
   public sendPlay() {

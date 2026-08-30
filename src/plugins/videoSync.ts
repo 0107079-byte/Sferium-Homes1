@@ -1,25 +1,56 @@
 /**
- * VideoSyncPlugin - Hardened Video Synchronization Engine
- * Watch Party / Sferium-Homes Sync
+ * SyncController & Unified Player Adapters
+ * Watch Party / Sferium-Homes Authoritative Video Synchronization Engine
  *
- * Provides sub-second timeline synchronization with latency compensation,
- * anti-drift correction, anti-jitter protection, and unified adapters
- * for HTML5 Video, YouTube, VK Video, Rutube, and generic iframe players.
+ * Provides:
+ * 1. Single Authoritative SyncController (Host authoritative timeline, Server relay, Guest slave)
+ * 2. 3-Zone Drift Correction (Zone 1: Deadband <80ms, Zone 2: Soft Rate Correction 80-350ms, Zone 3: Hard Seek >=350ms)
+ * 3. Monotonic Revision Guard (Rejection of out-of-order & stale packets)
+ * 4. Unified Player Adapters (HTML5, YouTube, VK Video, Rutube, Yandex/Generic)
+ * 5. Strict Latency Compensation and Clock Skew Offset Estimation
+ * 6. Single Lifecycle-managed Heartbeat & Alignment Loops
  */
 
 // ==========================================
-// 1. Unified Player Interface & Adapters
+// 1. Interfaces & Types
 // ==========================================
 
-export interface UnifiedPlayer {
-  play(): void | Promise<void>;
+export interface PlayerAdapter {
+  play(): Promise<void> | void;
   pause(): void;
-  seekTo(time: number): void;
+  seekTo(time: number): Promise<void> | void;
   getCurrentTime(): number;
   getDuration(): number;
   setPlaybackRate(rate: number): void;
   getPlaybackRate(): number;
-  isPlaying?(): boolean;
+  isPlaying(): boolean;
+  isReady?(): boolean;
+  destroy?(): void;
+}
+
+// Backward-compatible alias
+export type UnifiedPlayer = PlayerAdapter;
+
+export interface SyncState {
+  roomId: string;
+  revision: number;
+  position: number;
+  playing: boolean;
+  playbackRate: number;
+  updatedAt: number;
+  serverTime: number;
+  senderId?: string;
+}
+
+export interface SyncCommand {
+  type: 'SYNC_COMMAND';
+  command: 'play' | 'pause' | 'seek' | 'rate';
+  roomId: string;
+  position?: number;
+  playing?: boolean;
+  playbackRate?: number;
+  revision?: number;
+  updatedAt?: number;
 }
 
 export interface VideoSyncPayload {
@@ -33,10 +64,11 @@ export interface VideoSyncPayload {
 }
 
 export interface VideoSyncMessage {
-  type: 'video:sync' | 'video:play' | 'video:pause' | 'video:seek' | string;
+  type: string;
   roomId?: string;
   time?: number;
   currentTime?: number;
+  position?: number;
   playing?: boolean;
   isPlaying?: boolean;
   rate?: number;
@@ -44,8 +76,32 @@ export interface VideoSyncMessage {
   updatedAt?: number;
   serverTime?: number;
   revision?: number;
+  senderId?: string;
+  command?: 'play' | 'pause' | 'seek' | 'rate';
   payload?: any;
 }
+
+export interface DriftCorrectionConfig {
+  deadbandSeconds: number;       // Zone 1/2 boundary: >= 80ms enters soft rate correction
+  deadbandExitSeconds: number;   // Zone 2 exit hysteresis: < 40ms exits soft rate correction
+  softThresholdSeconds: number;  // Zone 2/3 boundary: >= 350ms triggers hard seek
+  hardSeekThresholdSeconds: number; // Zone 3 threshold (350ms)
+  softSpeedupRate: number;       // 1.05
+  softSlowdownRate: number;      // 0.95
+  seekCooldownMs: number;        // Cooldown between hard seeks (400ms)
+  enableTelemetry?: boolean;     // Development telemetry
+}
+
+export const DEFAULT_DRIFT_CONFIG: DriftCorrectionConfig = {
+  deadbandSeconds: 0.08,         // 80 ms
+  deadbandExitSeconds: 0.04,     // 40 ms (Hysteresis exit threshold)
+  softThresholdSeconds: 0.35,     // 350 ms
+  hardSeekThresholdSeconds: 0.35, // 350 ms
+  softSpeedupRate: 1.05,
+  softSlowdownRate: 0.95,
+  seekCooldownMs: 400,
+  enableTelemetry: false,
+};
 
 export type WSConnection = WebSocket | {
   send: (data: string) => void;
@@ -56,10 +112,14 @@ export type WSConnection = WebSocket | {
   subscribe?: (handler: (msg: any) => void) => () => void;
 };
 
+// ==========================================
+// 2. Unified Player Adapters
+// ==========================================
+
 /**
- * 1.1 HTML5 Video Player Adapter
+ * 2.1 HTML5 Video Player Adapter
  */
-export class HTML5VideoPlayerAdapter implements UnifiedPlayer {
+export class HTML5VideoPlayerAdapter implements PlayerAdapter {
   private video: HTMLVideoElement;
 
   constructor(video: HTMLVideoElement) {
@@ -98,7 +158,7 @@ export class HTML5VideoPlayerAdapter implements UnifiedPlayer {
   }
 
   setPlaybackRate(rate: number): void {
-    if (this.video && rate > 0) {
+    if (this.video && rate > 0 && isFinite(rate)) {
       this.video.playbackRate = rate;
     }
   }
@@ -110,12 +170,18 @@ export class HTML5VideoPlayerAdapter implements UnifiedPlayer {
   isPlaying(): boolean {
     return Boolean(this.video && !this.video.paused && !this.video.ended);
   }
+
+  isReady(): boolean {
+    return Boolean(this.video && this.video.readyState >= 1);
+  }
+
+  destroy(): void {}
 }
 
 /**
- * 1.2 YouTube Player Adapter
+ * 2.2 YouTube Player Adapter
  */
-export class YouTubePlayerAdapter implements UnifiedPlayer {
+export class YouTubePlayerAdapter implements PlayerAdapter {
   private player: any;
 
   constructor(player: any) {
@@ -213,12 +279,18 @@ export class YouTubePlayerAdapter implements UnifiedPlayer {
     } catch {}
     return false;
   }
+
+  isReady(): boolean {
+    return Boolean(this.player && typeof this.player.getCurrentTime === 'function');
+  }
+
+  destroy(): void {}
 }
 
 /**
- * 1.3 VK Video Player Adapter
+ * 2.3 VK Video Player Adapter
  */
-export class VKVideoPlayerAdapter implements UnifiedPlayer {
+export class VKVideoPlayerAdapter implements PlayerAdapter {
   private player: any;
   private localRate: number = 1.0;
 
@@ -323,12 +395,103 @@ export class VKVideoPlayerAdapter implements UnifiedPlayer {
     } catch {}
     return false;
   }
+
+  isReady(): boolean {
+    return Boolean(this.player);
+  }
+
+  destroy(): void {}
 }
 
 /**
- * 1.4 Generic / Universal Player Adapter (Rutube, Dzen, UniversalPlayer, etc.)
+ * 2.4 Rutube Player Adapter
  */
-export class GenericPlayerAdapter implements UnifiedPlayer {
+export class RutubePlayerAdapter implements PlayerAdapter {
+  private player: any;
+  private localRate: number = 1.0;
+
+  constructor(player: any) {
+    this.player = player;
+  }
+
+  play(): void {
+    if (!this.player) return;
+    try {
+      if (typeof this.player.play === 'function') this.player.play();
+    } catch (e) {
+      console.warn('[RutubePlayerAdapter] play error:', e);
+    }
+  }
+
+  pause(): void {
+    if (!this.player) return;
+    try {
+      if (typeof this.player.pause === 'function') this.player.pause();
+    } catch (e) {
+      console.warn('[RutubePlayerAdapter] pause error:', e);
+    }
+  }
+
+  seekTo(time: number): void {
+    if (!this.player || isNaN(time)) return;
+    try {
+      if (typeof this.player.seekTo === 'function') {
+        this.player.seekTo(time);
+      } else if (typeof this.player.seek === 'function') {
+        this.player.seek(time);
+      }
+    } catch (e) {
+      console.warn('[RutubePlayerAdapter] seekTo error:', e);
+    }
+  }
+
+  getCurrentTime(): number {
+    if (!this.player) return 0;
+    try {
+      if (typeof this.player.getCurrentTime === 'function') return this.player.getCurrentTime() || 0;
+    } catch {}
+    return 0;
+  }
+
+  getDuration(): number {
+    if (!this.player) return 0;
+    try {
+      if (typeof this.player.getDuration === 'function') return this.player.getDuration() || 0;
+    } catch {}
+    return 0;
+  }
+
+  setPlaybackRate(rate: number): void {
+    this.localRate = rate;
+    if (!this.player || rate <= 0) return;
+    try {
+      if (typeof this.player.setPlaybackRate === 'function') this.player.setPlaybackRate(rate);
+    } catch {}
+  }
+
+  getPlaybackRate(): number {
+    return this.localRate;
+  }
+
+  isPlaying(): boolean {
+    if (!this.player) return false;
+    try {
+      if (typeof this.player.isPlaying === 'function') return Boolean(this.player.isPlaying());
+    } catch {}
+    return false;
+  }
+
+  isReady(): boolean {
+    return Boolean(this.player);
+  }
+
+  destroy(): void {}
+}
+
+/**
+ * 2.5 Generic / Universal Player Adapter (Yandex, Dzen, UniversalPlayer, etc.)
+ */
+export class GenericPlayerAdapter implements PlayerAdapter {
   private player: any;
   private localRate: number = 1.0;
 
@@ -438,17 +601,29 @@ export class GenericPlayerAdapter implements UnifiedPlayer {
     } catch {}
     return false;
   }
+
+  isReady(): boolean {
+    return Boolean(this.player);
+  }
+
+  destroy(): void {}
 }
 
 /**
- * Adapter factory helper to convert any player instance to UnifiedPlayer
+ * Adapter factory helper to convert any player instance to PlayerAdapter
  */
-export function wrapAsUnifiedPlayer(player: any): UnifiedPlayer {
+export function wrapAsUnifiedPlayer(player: any): PlayerAdapter {
   if (!player) {
     return new GenericPlayerAdapter(null);
   }
-  if (typeof player.play === 'function' && typeof player.pause === 'function' && typeof player.seekTo === 'function' && typeof player.getCurrentTime === 'function' && typeof player.setPlaybackRate === 'function') {
-    return player as UnifiedPlayer;
+  if (
+    typeof player.play === 'function' &&
+    typeof player.pause === 'function' &&
+    typeof player.seekTo === 'function' &&
+    typeof player.getCurrentTime === 'function' &&
+    typeof player.setPlaybackRate === 'function'
+  ) {
+    return player as PlayerAdapter;
   }
   if (player.tagName === 'VIDEO' || (typeof HTMLVideoElement !== 'undefined' && player instanceof HTMLVideoElement)) {
     return new HTML5VideoPlayerAdapter(player);
@@ -463,7 +638,7 @@ export function wrapAsUnifiedPlayer(player: any): UnifiedPlayer {
 }
 
 // ==========================================
-// 2. Anti-Drift & Network Latency Algorithm
+// 3. Mathematical 3-Zone Drift Correction
 // ==========================================
 
 export interface ApplySyncResult {
@@ -472,30 +647,26 @@ export interface ApplySyncResult {
   rateChanged: boolean;
   drift: number;
   correctedHostTime: number;
+  appliedRate: number;
 }
 
 /**
  * applySync
- * Core anti-drift function with latency compensation and jitter protection.
- *
- * Rules:
- * 1. If Math.abs(playerTime - hostTime) > 0.3s -> perform seekTo(hostTime).
- * 2. If hostPlaying === true and playing === false -> call play().
- * 3. If hostPlaying === false and playing === true -> call pause().
- * 4. If hostRate !== rate -> call setPlaybackRate(hostRate).
- * 5. Protection against jitter:
- *    - No seekTo if drift <= 0.3s.
- *    - No redundant play/pause if state already matches.
+ * 3-Zone Anti-Drift Engine:
+ * - Zone 1: |drift| < deadband (80ms) -> No seek, rate = authoritative rate
+ * - Zone 2: deadband <= |drift| < hardSeekThreshold (80ms..350ms) -> Smooth playbackRate correction (0.95 or 1.05)
+ * - Zone 3: |drift| >= hardSeekThreshold (>= 350ms) -> Single hard seekTo(correctedHostTime)
  */
 export function applySync(
-  player: UnifiedPlayer,
+  player: PlayerAdapter,
   playerTime: number,
   hostTime: number,
   playing: boolean,
   hostPlaying: boolean,
   rate: number,
   hostRate: number,
-  updatedAt?: number
+  updatedAt?: number,
+  config: DriftCorrectionConfig = DEFAULT_DRIFT_CONFIG
 ): ApplySyncResult {
   let seeked = false;
   let stateChanged = false;
@@ -506,21 +677,45 @@ export function applySync(
   const latencyMs = updatedAt && updatedAt > 0 ? Math.max(0, now - updatedAt) : 0;
   const latencySeconds = latencyMs / 1000;
 
-  // If host is playing, the video has progressed by (latency * hostRate) during transmission
+  // If host is playing, video advanced by (latency * hostRate) during network transit
   const effectiveHostRate = hostRate > 0 ? hostRate : 1.0;
   const correctedHostTime = hostPlaying
     ? hostTime + latencySeconds * effectiveHostRate
     : hostTime;
 
-  const drift = Math.abs(playerTime - correctedHostTime);
+  const rawDiff = playerTime - correctedHostTime; // positive: guest is ahead, negative: guest is behind
+  const drift = Math.abs(rawDiff);
 
-  // 2. Strict 0.3s drift threshold
-  if (drift > 0.3) {
+  let targetRate = effectiveHostRate;
+
+  // 2. Three-Zone Drift Strategy
+  if (drift >= config.hardSeekThresholdSeconds) {
+    // ZONE 3: Hard Seek
     player.seekTo(correctedHostTime);
     seeked = true;
+    targetRate = effectiveHostRate;
+  } else if (drift >= config.deadbandSeconds && hostPlaying) {
+    // ZONE 2: Soft Rate Correction
+    if (rawDiff > 0) {
+      // Guest is ahead of host -> slow down smoothly
+      targetRate = effectiveHostRate * config.softSlowdownRate;
+    } else {
+      // Guest is behind host -> speed up smoothly
+      targetRate = effectiveHostRate * config.softSpeedupRate;
+    }
+  } else {
+    // ZONE 1: Deadband -> perfect sync, match host rate
+    targetRate = effectiveHostRate;
   }
 
-  // 3. Synchronize play / pause states
+  // 3. Apply playback rate if changed
+  const currentRate = rate > 0 ? rate : 1.0;
+  if (Math.abs(targetRate - currentRate) > 0.01) {
+    player.setPlaybackRate(targetRate);
+    rateChanged = true;
+  }
+
+  // 4. Synchronize play / pause states
   if (hostPlaying && !playing) {
     player.play();
     stateChanged = true;
@@ -529,36 +724,32 @@ export function applySync(
     stateChanged = true;
   }
 
-  // 4. Synchronize playback rate
-  const currentRate = rate > 0 ? rate : 1.0;
-  if (Math.abs(effectiveHostRate - currentRate) > 0.01) {
-    player.setPlaybackRate(effectiveHostRate);
-    rateChanged = true;
-  }
-
   return {
     seeked,
     stateChanged,
     rateChanged,
     drift,
     correctedHostTime,
+    appliedRate: targetRate,
   };
 }
 
 // ==========================================
-// 3. VideoSyncPlugin Class
+// 4. Authoritative SyncController Class
 // ==========================================
 
-export class VideoSyncPlugin {
-  private player: UnifiedPlayer;
+export class SyncController {
+  private player: PlayerAdapter;
   private ws: any;
   public isHost: boolean;
   public roomId: string;
+  public config: DriftCorrectionConfig;
 
   private hostInterval: any = null;
   private guestInterval: any = null;
   private isRunning: boolean = false;
   private lastSeekCooldown: number = 0;
+  private isSoftCorrecting: boolean = false;
 
   public lastAppliedRevision: number = 0;
   public clockOffset: number = 0; // clientTime - serverTime
@@ -569,28 +760,32 @@ export class VideoSyncPlugin {
     playing: boolean;
     rate: number;
     updatedAt: number;
-    serverTime?: number;
-    revision?: number;
+    serverTime: number;
+    revision: number;
   } = {
     time: 0,
     playing: false,
     rate: 1.0,
     updatedAt: Date.now(),
+    serverTime: Date.now(),
+    revision: 0,
   };
 
   private boundMessageHandler: ((e: any) => void) | null = null;
   private unsubscribeFn: (() => void) | null = null;
 
   constructor(
-    player: UnifiedPlayer | any,
+    player: PlayerAdapter | any,
     ws: any,
     isHost: boolean,
-    roomId: string
+    roomId: string,
+    config: DriftCorrectionConfig = DEFAULT_DRIFT_CONFIG
   ) {
     this.player = wrapAsUnifiedPlayer(player);
     this.ws = ws;
     this.isHost = isHost;
     this.roomId = roomId;
+    this.config = { ...DEFAULT_DRIFT_CONFIG, ...config };
   }
 
   /**
@@ -629,6 +824,8 @@ export class VideoSyncPlugin {
       this.startHostBroadcastLoop();
     } else {
       this.startGuestAlignmentLoop();
+      // On start / reconnect, immediately request latest state from server
+      this.requestServerSync();
     }
   }
 
@@ -649,6 +846,10 @@ export class VideoSyncPlugin {
     }
 
     this.removeWebSocketListeners();
+  }
+
+  public destroy(): void {
+    this.stop();
   }
 
   /**
@@ -672,32 +873,27 @@ export class VideoSyncPlugin {
         this.startHostBroadcastLoop();
       } else {
         this.startGuestAlignmentLoop();
+        this.requestServerSync();
       }
     }
   }
 
-  /**
-   * Update Room ID
-   */
   public updateRoomId(roomId: string): void {
     this.roomId = roomId;
   }
 
-  /**
-   * Update Player instance (e.g., when user switches video provider)
-   */
   public updatePlayer(player: any): void {
     this.player = wrapAsUnifiedPlayer(player);
   }
 
-  /**
-   * Update WebSocket connection
-   */
   public updateWebSocket(ws: any): void {
     this.removeWebSocketListeners();
     this.ws = ws;
     if (this.isRunning) {
       this.setupWebSocketListeners();
+      if (!this.isHost) {
+        this.requestServerSync();
+      }
     }
   }
 
@@ -706,7 +902,7 @@ export class VideoSyncPlugin {
   // ----------------------------------------------------
 
   /**
-   * 3.1 Host Broadcast Loop (Every 500 ms)
+   * Host Broadcast Loop (Single 500 ms heartbeat loop)
    */
   private startHostBroadcastLoop(): void {
     if (this.hostInterval) clearInterval(this.hostInterval);
@@ -719,30 +915,48 @@ export class VideoSyncPlugin {
       const rate = this.player.getPlaybackRate() || 1.0;
       const now = Date.now();
 
-      const payload: VideoSyncPayload = {
+      this.sendWsMessage({
+        type: 'SYNC_STATE',
+        roomId: this.roomId,
+        position: currentTime,
+        time: currentTime,
+        playing: isPlaying,
+        playbackRate: rate,
+        rate: rate,
+        updatedAt: now,
+        serverTime: now,
+      });
+
+      // Backward compatible video:sync message
+      this.sendWsMessage({
+        type: 'video:sync',
         roomId: this.roomId,
         time: currentTime,
         playing: isPlaying,
         rate: rate,
         updatedAt: now,
         serverTime: now,
-      };
-
-      this.sendWsMessage({
-        type: 'video:sync',
-        ...payload,
       });
     }, 500);
   }
 
-  /**
-   * Host triggers play
-   */
   public notifyPlay(): void {
     if (!this.isHost) return;
     const time = this.player.getCurrentTime();
     const rate = this.player.getPlaybackRate() || 1.0;
     const now = Date.now();
+
+    this.sendWsMessage({
+      type: 'SYNC_COMMAND',
+      command: 'play',
+      roomId: this.roomId,
+      position: time,
+      time,
+      playing: true,
+      playbackRate: rate,
+      rate,
+      updatedAt: now,
+    });
 
     this.sendWsMessage({
       type: 'video:play',
@@ -751,18 +965,26 @@ export class VideoSyncPlugin {
       playing: true,
       rate,
       updatedAt: now,
-      serverTime: now,
     });
   }
 
-  /**
-   * Host triggers pause
-   */
   public notifyPause(): void {
     if (!this.isHost) return;
     const time = this.player.getCurrentTime();
     const rate = this.player.getPlaybackRate() || 1.0;
     const now = Date.now();
+
+    this.sendWsMessage({
+      type: 'SYNC_COMMAND',
+      command: 'pause',
+      roomId: this.roomId,
+      position: time,
+      time,
+      playing: false,
+      playbackRate: rate,
+      rate,
+      updatedAt: now,
+    });
 
     this.sendWsMessage({
       type: 'video:pause',
@@ -771,18 +993,26 @@ export class VideoSyncPlugin {
       playing: false,
       rate,
       updatedAt: now,
-      serverTime: now,
     });
   }
 
-  /**
-   * Host triggers seek
-   */
   public notifySeek(time: number): void {
     if (!this.isHost) return;
     const isPlaying = typeof this.player.isPlaying === 'function' ? this.player.isPlaying() : false;
     const rate = this.player.getPlaybackRate() || 1.0;
     const now = Date.now();
+
+    this.sendWsMessage({
+      type: 'SYNC_COMMAND',
+      command: 'seek',
+      roomId: this.roomId,
+      position: time,
+      time,
+      playing: isPlaying,
+      playbackRate: rate,
+      rate,
+      updatedAt: now,
+    });
 
     this.sendWsMessage({
       type: 'video:seek',
@@ -791,59 +1021,68 @@ export class VideoSyncPlugin {
       playing: isPlaying,
       rate,
       updatedAt: now,
-      serverTime: now,
+    });
+  }
+
+  public notifyRate(rate: number): void {
+    if (!this.isHost) return;
+    const time = this.player.getCurrentTime();
+    const isPlaying = typeof this.player.isPlaying === 'function' ? this.player.isPlaying() : false;
+    const now = Date.now();
+
+    this.sendWsMessage({
+      type: 'SYNC_COMMAND',
+      command: 'rate',
+      roomId: this.roomId,
+      position: time,
+      time,
+      playing: isPlaying,
+      playbackRate: rate,
+      rate,
+      updatedAt: now,
     });
   }
 
   // ----------------------------------------------------
-  // Guest Alignment
+  // Guest Alignment Loop
   // ----------------------------------------------------
 
-  /**
-   * 3.2 Guest Periodic Alignment Loop (Every 750–1000 ms)
-   */
   private startGuestAlignmentLoop(): void {
     if (this.guestInterval) clearInterval(this.guestInterval);
 
     this.guestInterval = setInterval(() => {
       if (this.isHost || !this.isRunning) return;
       this.alignGuestWithHost();
-    }, 800);
+    }, 700);
   }
 
-  /**
-   * Performs comparison with latest Host/Server state
-   */
+  public requestServerSync(): void {
+    this.sendWsMessage({
+      type: 'SYNC_REQUEST',
+      roomId: this.roomId,
+    });
+  }
+
   public alignGuestWithHost(): ApplySyncResult | null {
     if (!this.player) return null;
-
-    const now = Date.now();
-    // Anti-jitter: Avoid consecutive seeks within 400ms cooldown window
-    if (now - this.lastSeekCooldown < 400) {
-      return null;
-    }
 
     const localTime = this.player.getCurrentTime();
     const localPlaying = typeof this.player.isPlaying === 'function' ? this.player.isPlaying() : false;
     const localRate = this.player.getPlaybackRate() || 1.0;
 
     const estimatedServerPosition = this.calculateEstimatedServerPosition();
-    const drift = Math.abs(localTime - estimatedServerPosition);
+    const rawDiff = localTime - estimatedServerPosition; // positive: local is ahead, negative: local is behind
+    const drift = Math.abs(rawDiff);
 
+    const now = Date.now();
     let seeked = false;
     let stateChanged = false;
     let rateChanged = false;
+    let appliedRate = this.lastHostState.rate > 0 ? this.lastHostState.rate : 1.0;
 
     this.isApplyingRemoteUpdate = true;
     try {
-      // 1. Hard seek if drift > 0.4s
-      if (drift > 0.4) {
-        this.player.seekTo(estimatedServerPosition);
-        seeked = true;
-        this.lastSeekCooldown = now;
-      }
-
-      // 2. Sync play/pause state
+      // 1. Play / Pause State Alignment
       if (this.lastHostState.playing && !localPlaying) {
         this.player.play();
         stateChanged = true;
@@ -852,16 +1091,65 @@ export class VideoSyncPlugin {
         stateChanged = true;
       }
 
-      // 3. Sync rate
-      const targetRate = this.lastHostState.rate > 0 ? this.lastHostState.rate : 1.0;
-      if (Math.abs(targetRate - localRate) > 0.01) {
-        this.player.setPlaybackRate(targetRate);
-        rateChanged = true;
+      // 2. Three-Zone Drift Strategy with Hysteresis
+      if (drift >= this.config.hardSeekThresholdSeconds) {
+        // ZONE 3: Hard Seek (Guarded by Cooldown to prevent seek storms)
+        this.isSoftCorrecting = false;
+        if (now - this.lastSeekCooldown >= this.config.seekCooldownMs) {
+          this.player.seekTo(estimatedServerPosition);
+          seeked = true;
+          this.lastSeekCooldown = now;
+          appliedRate = this.lastHostState.rate > 0 ? this.lastHostState.rate : 1.0;
+          this.player.setPlaybackRate(appliedRate);
+        }
+      } else if (this.lastHostState.playing) {
+        // Evaluate soft correction zone with hysteresis
+        if (drift >= this.config.deadbandSeconds) {
+          this.isSoftCorrecting = true;
+        } else if (drift < this.config.deadbandExitSeconds) {
+          this.isSoftCorrecting = false;
+        }
+
+        if (this.isSoftCorrecting) {
+          // ZONE 2: Soft Rate Correction relative to authoritative host rate
+          const hostBaseRate = this.lastHostState.rate > 0 ? this.lastHostState.rate : 1.0;
+          if (rawDiff > 0) {
+            // Guest is ahead -> slow down
+            appliedRate = hostBaseRate * this.config.softSlowdownRate;
+          } else {
+            // Guest is behind -> speed up
+            appliedRate = hostBaseRate * this.config.softSpeedupRate;
+          }
+          if (Math.abs(appliedRate - localRate) > 0.01) {
+            this.player.setPlaybackRate(appliedRate);
+            rateChanged = true;
+          }
+        } else {
+          // ZONE 1: Deadband -> match host rate
+          appliedRate = this.lastHostState.rate > 0 ? this.lastHostState.rate : 1.0;
+          if (Math.abs(appliedRate - localRate) > 0.01) {
+            this.player.setPlaybackRate(appliedRate);
+            rateChanged = true;
+          }
+        }
+      } else {
+        // Host paused -> maintain host base rate
+        this.isSoftCorrecting = false;
+        appliedRate = this.lastHostState.rate > 0 ? this.lastHostState.rate : 1.0;
+        if (Math.abs(appliedRate - localRate) > 0.01) {
+          this.player.setPlaybackRate(appliedRate);
+          rateChanged = true;
+        }
       }
     } finally {
       setTimeout(() => {
         this.isApplyingRemoteUpdate = false;
       }, 50);
+    }
+
+    if (this.config.enableTelemetry) {
+      const mode = seeked ? 'HARD_SEEK' : (this.isSoftCorrecting ? 'SOFT_CORRECTION' : 'DEADBAND_IN_SYNC');
+      console.debug(`[SYNC] rev=${this.lastAppliedRevision} auth=${estimatedServerPosition.toFixed(3)} local=${localTime.toFixed(3)} drift=${Math.round(drift * 1000)}ms mode=${mode} rate=${appliedRate.toFixed(3)} latency=${Math.round(Math.abs(this.clockOffset))}ms`);
     }
 
     return {
@@ -870,6 +1158,7 @@ export class VideoSyncPlugin {
       rateChanged,
       drift,
       correctedHostTime: estimatedServerPosition,
+      appliedRate,
     };
   }
 
@@ -887,9 +1176,7 @@ export class VideoSyncPlugin {
           raw = JSON.parse(raw);
         }
         this.handleIncomingMessage(raw);
-      } catch (err) {
-        // Non-JSON or benign event
-      }
+      } catch (err) {}
     };
 
     if (typeof this.ws.addEventListener === 'function') {
@@ -918,9 +1205,6 @@ export class VideoSyncPlugin {
     }
   }
 
-  /**
-   * Handle incoming sync messages
-   */
   public handleIncomingMessage(msg: VideoSyncMessage): void {
     if (!msg || typeof msg !== 'object') return;
 
@@ -944,19 +1228,20 @@ export class VideoSyncPlugin {
 
     const type = msg.type;
 
-    // Normalizing sync message types
-    const isSyncEvent = type === 'video:sync' || type === 'sync:state' || type === 'video_sync' || type === 'player:heartbeat';
-    const isPlayEvent = type === 'video:play' || type === 'sync:play' || type === 'play_video' || type === 'sync_play';
-    const isPauseEvent = type === 'video:pause' || type === 'sync:pause' || type === 'pause_video' || type === 'sync_pause';
-    const isSeekEvent = type === 'video:seek' || type === 'sync:seek' || type === 'seek_video' || type === 'sync_seek' || type === 'player:seek';
+    const isSyncState = type === 'SYNC_STATE' || type === 'video:sync' || type === 'sync:state' || type === 'video_sync' || type === 'player:heartbeat';
+    const isCommand = type === 'SYNC_COMMAND';
+    const isPlayEvent = isCommand ? msg.command === 'play' : (type === 'video:play' || type === 'sync:play' || type === 'play_video' || type === 'sync_play');
+    const isPauseEvent = isCommand ? msg.command === 'pause' : (type === 'video:pause' || type === 'sync:pause' || type === 'pause_video' || type === 'sync_pause');
+    const isSeekEvent = isCommand ? msg.command === 'seek' : (type === 'video:seek' || type === 'sync:seek' || type === 'seek_video' || type === 'sync_seek' || type === 'player:seek');
 
-    if (!isSyncEvent && !isPlayEvent && !isPauseEvent && !isSeekEvent && type !== 'player:state' && type !== 'room_state') {
+    if (!isSyncState && !isCommand && !isPlayEvent && !isPauseEvent && !isSeekEvent && type !== 'player:state' && type !== 'room_state') {
       return;
     }
 
-    // Extract time
+    // Extract position/time
     let time = 0;
-    if (typeof msg.time === 'number') time = msg.time;
+    if (typeof msg.position === 'number') time = msg.position;
+    else if (typeof msg.time === 'number') time = msg.time;
     else if (typeof msg.currentTime === 'number') time = msg.currentTime;
     else if (msg.payload && typeof msg.payload.time === 'number') time = msg.payload.time;
     else if (typeof msg.time === 'string') time = parseFloat(msg.time) || 0;
@@ -972,11 +1257,10 @@ export class VideoSyncPlugin {
 
     // Extract rate
     let rate = 1.0;
-    if (typeof msg.rate === 'number' && msg.rate > 0) rate = msg.rate;
-    else if (typeof msg.playbackRate === 'number' && msg.playbackRate > 0) rate = msg.playbackRate;
+    if (typeof msg.playbackRate === 'number' && msg.playbackRate > 0) rate = msg.playbackRate;
+    else if (typeof msg.rate === 'number' && msg.rate > 0) rate = msg.rate;
     else if (this.lastHostState.rate > 0) rate = this.lastHostState.rate;
 
-    // Extract timestamp
     const updatedAt = (typeof msg.updatedAt === 'number' && msg.updatedAt > 0)
       ? msg.updatedAt
       : (msg.payload?.ts || Date.now());
@@ -987,26 +1271,25 @@ export class VideoSyncPlugin {
       rate,
       updatedAt,
       serverTime: msg.serverTime || updatedAt,
-      revision: msg.revision,
+      revision: msg.revision || this.lastAppliedRevision,
     };
 
-    // If we are a guest, react immediately to event-driven updates
+    // If we are a guest, apply authoritative updates immediately
     if (!this.isHost) {
       this.isApplyingRemoteUpdate = true;
       try {
         if (isPlayEvent) {
           this.lastHostState.playing = true;
           this.player.play();
-          if (time > 0) {
-            const localTime = this.player.getCurrentTime();
-            if (Math.abs(localTime - time) > 0.3) {
-              this.player.seekTo(time);
-            }
+          const targetPos = this.calculateEstimatedServerPosition();
+          const localTime = this.player.getCurrentTime();
+          if (Math.abs(localTime - targetPos) >= this.config.hardSeekThresholdSeconds) {
+            this.player.seekTo(targetPos);
           }
         } else if (isPauseEvent) {
           this.lastHostState.playing = false;
           this.player.pause();
-          if (time > 0) {
+          if (time > 0 || (time === 0 && Math.abs(this.player.getCurrentTime()) > 0.1)) {
             this.player.seekTo(time);
           }
         } else if (isSeekEvent) {
@@ -1029,9 +1312,6 @@ export class VideoSyncPlugin {
     }
   }
 
-  /**
-   * Helper to send JSON messages through WebSocket
-   */
   private sendWsMessage(obj: any): void {
     if (!this.ws) return;
     try {
@@ -1042,7 +1322,7 @@ export class VideoSyncPlugin {
         }
       }
     } catch (e) {
-      console.warn('[VideoSyncPlugin] sendWsMessage failed:', e);
+      console.warn('[SyncController] sendWsMessage failed:', e);
     }
   }
 
@@ -1051,4 +1331,7 @@ export class VideoSyncPlugin {
   }
 }
 
-export default VideoSyncPlugin;
+// Backward-compatible alias
+export const VideoSyncPlugin = SyncController;
+export type VideoSyncPlugin = SyncController;
+export default SyncController;

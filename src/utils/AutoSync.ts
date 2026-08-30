@@ -94,44 +94,11 @@ class AutoSyncEngine {
 export const autoSyncEngine = new AutoSyncEngine();
 
 /**
- * startAutoSync
- * Timeline drift correction loop using hardened applySync algorithm.
+ * startAutoSync (Deprecated - Consolidated into single authoritative SyncController)
+ * Provided for backwards compatibility without running competing interval loops.
  */
-export function startAutoSync(player: any, sync: { currentTime?: number; isPlaying?: boolean; rate?: number } | any): () => void {
-  const unified = wrapAsUnifiedPlayer(player);
-
-  const interval = setInterval(() => {
-    if (!player) return;
-
-    const localTime = unified.getCurrentTime();
-    const localPlaying = typeof unified.isPlaying === 'function' ? unified.isPlaying() : false;
-    const localRate = unified.getPlaybackRate();
-
-    const hostTime =
-      typeof sync.currentTime === 'function'
-        ? sync.currentTime()
-        : sync.currentTime !== undefined
-        ? sync.currentTime
-        : 0;
-
-    const hostPlaying =
-      typeof sync.isPlaying === 'function'
-        ? sync.isPlaying()
-        : sync.isPlaying !== undefined
-        ? Boolean(sync.isPlaying)
-        : (sync.playing !== undefined ? Boolean(sync.playing) : localPlaying);
-
-    const hostRate =
-      typeof sync.rate === 'function'
-        ? sync.rate()
-        : sync.rate !== undefined
-        ? Number(sync.rate)
-        : 1.0;
-
-    applySync(unified, localTime, hostTime, localPlaying, hostPlaying, localRate, hostRate);
-  }, 800);
-
-  return () => clearInterval(interval);
+export function startAutoSync(_player?: any, _sync?: any): () => void {
+  return () => {};
 }
 
 export default startAutoSync;

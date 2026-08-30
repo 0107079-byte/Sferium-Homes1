@@ -1,4 +1,4 @@
-import React, { forwardRef, useImperativeHandle, useRef, useEffect } from 'react';
+import React, { forwardRef, useImperativeHandle, useRef } from 'react';
 import { VideoProvider } from '../types';
 import { extractVideoId } from '../utils/extractVideoId';
 import { YouTubePlayer, YouTubePlayerRef } from './YouTubePlayer';
@@ -6,7 +6,6 @@ import { VkPlayer, VkPlayerRef } from './VkPlayer';
 import { RutubePlayer, RutubePlayerRef } from './RutubePlayer';
 import { UniversalPlayer, UniversalPlayerRef } from './UniversalPlayer';
 import { createIframeAdapter, IframePlayerAdapter } from '../utils/iframeAdapter';
-import { startAutoSync } from '../utils/AutoSync';
 
 export interface VideoPlayerRef {
   getCurrentTime: () => number;
@@ -102,27 +101,6 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, VideoPlayerProps>(
         return iframe ? createIframeAdapter(iframe) : null;
       },
     }));
-
-    // AutoSync integration for timeline drift correction
-    useEffect(() => {
-      if (isHost) return;
-      const player = {
-        getCurrentTime: () => {
-          const p = getActivePlayer();
-          return p?.getCurrentTime?.() ?? 0;
-        },
-        isPlaying: () => {
-          const p = getActivePlayer();
-          return p?.isPlaying?.() ?? false;
-        },
-        play: () => getActivePlayer()?.play?.(),
-        pause: () => getActivePlayer()?.pause?.(),
-        seekTo: (t: number) => getActivePlayer()?.seekTo?.(t),
-      };
-
-      const stopSync = startAutoSync(player, { currentTime });
-      return () => stopSync();
-    }, [isHost, currentTime, provider]);
 
     return (
       <div ref={containerRef} className="w-full h-full relative overflow-hidden bg-black flex items-center justify-center">

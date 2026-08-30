@@ -298,31 +298,8 @@ export const Room: React.FC<RoomProps> = ({
     };
   }, [roomId, currentUser]);
 
-  // Video sync plugin controller
-  const videoSyncRef = useRef<ReturnType<typeof initVideoSync> | null>(null);
-
+  // Auto-connect to LiveKit room
   useEffect(() => {
-    const rawWs = syncSocket.getSocket();
-    const sync = initVideoSync({
-      roomId,
-      ws: rawWs || syncSocket,
-      getVideoElement: () => document.querySelector('video'),
-      getYouTubePlayer: () => (window as any).youTubePlayerInstance || ytRef.current,
-      getVKPlayer: () => vkRef.current,
-      getRutubePlayer: () => rutubeRef.current,
-      getUniversalPlayer: () => universalRef.current,
-    });
-    videoSyncRef.current = sync;
-
-    // Initialize P2P Controller fallback
-    p2pSync.init({
-      peerId: currentUser.userId,
-      roomId,
-      isHost,
-      fallbackWs: rawWs || syncSocket,
-    });
-
-    // Auto-connect to LiveKit room
     livekitSync.connect({
       roomId,
       userId: currentUser.userId,
@@ -330,71 +307,25 @@ export const Room: React.FC<RoomProps> = ({
     }).catch(() => {});
 
     return () => {
-      sync.destroy();
       p2pSync.disconnect();
     };
-  }, [roomId, currentUser.userId, currentUser.name, isHost]);
+  }, [roomId, currentUser.userId, currentUser.name]);
 
-  // Periodic host sync (every 1.5s)
-  useEffect(() => {
-    if (!isHost && !canControl) return;
-
-    const interval = setInterval(() => {
-      const video = document.querySelector('video');
-      if (video) {
-        sendStateCommand(video.currentTime, !video.paused);
-        videoSyncRef.current?.sendState(video.currentTime, !video.paused);
-        p2pSync.sendState(video.currentTime, !video.paused);
-      } else if (ytRef.current) {
-        const ytTime = ytRef.current.getCurrentTime ? ytRef.current.getCurrentTime() : localTime;
-        sendStateCommand(ytTime, isPlaying);
-        videoSyncRef.current?.sendState(ytTime, isPlaying);
-        p2pSync.sendState(ytTime, isPlaying);
-      } else if (vkRef.current) {
-        const vkTime = vkRef.current.getCurrentTime ? vkRef.current.getCurrentTime() : localTime;
-        sendStateCommand(vkTime, isPlaying);
-        videoSyncRef.current?.sendState(vkTime, isPlaying);
-        p2pSync.sendState(vkTime, isPlaying);
-      } else if (rutubeRef.current) {
-        const rutubeTime = rutubeRef.current.getCurrentTime ? rutubeRef.current.getCurrentTime() : localTime;
-        sendStateCommand(rutubeTime, isPlaying);
-        videoSyncRef.current?.sendState(rutubeTime, isPlaying);
-        p2pSync.sendState(rutubeTime, isPlaying);
-      } else if (universalRef.current) {
-        const uTime = universalRef.current.getCurrentTime ? universalRef.current.getCurrentTime() : localTime;
-        sendStateCommand(uTime, isPlaying);
-        videoSyncRef.current?.sendState(uTime, isPlaying);
-        p2pSync.sendState(uTime, isPlaying);
-      }
-    }, 1500);
-
-    return () => clearInterval(interval);
-  }, [isHost, canControl, isPlaying, localTime, sendStateCommand]);
-
-  // Playback handlers
+  // Playback handlers (Single authoritative dispatch via useVideoSync / syncSocket)
   const handlePlay = useCallback(() => {
     if (!canControl) return;
     sendPlayCommand(localTime);
-    videoSyncRef.current?.sendPlay(localTime);
-    p2pSync.sendPlay();
-    syncSocket.sendPlay(localTime);
   }, [canControl, localTime, sendPlayCommand]);
 
   const handlePause = useCallback(() => {
     if (!canControl) return;
     sendPauseCommand(localTime);
-    videoSyncRef.current?.sendPause(localTime);
-    p2pSync.sendPause();
-    syncSocket.sendPause(localTime);
   }, [canControl, localTime, sendPauseCommand]);
 
   const handleSeek = useCallback((time: number) => {
     if (!canControl) return;
     setLocalTime(time);
     sendSeekCommand(time);
-    videoSyncRef.current?.sendSeek(time);
-    p2pSync.sendSeek(time);
-    syncSocket.sendSeek(time);
   }, [canControl, sendSeekCommand]);
 
   const handleForceSync = useCallback(() => {

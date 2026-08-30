@@ -201,6 +201,23 @@ export const YouTubePlayer = forwardRef<YouTubePlayerRef, YouTubePlayerProps>(({
       }
       return -1;
     },
+    setPlaybackRate: (rate: number) => {
+      if (playerRef.current && isPlayerReady.current && playerRef.current.setPlaybackRate) {
+        try { playerRef.current.setPlaybackRate(rate); } catch {}
+      }
+    },
+    getPlaybackRate: () => {
+      if (playerRef.current && isPlayerReady.current && playerRef.current.getPlaybackRate) {
+        try { return playerRef.current.getPlaybackRate() || 1.0; } catch { return 1.0; }
+      }
+      return 1.0;
+    },
+    isPlaying: () => {
+      if (playerRef.current && isPlayerReady.current && playerRef.current.getPlayerState) {
+        try { return playerRef.current.getPlayerState() === 1; } catch { return false; }
+      }
+      return false;
+    },
   }), [initYouTubePlayer, loadVideoById]);
 
   // Initial load

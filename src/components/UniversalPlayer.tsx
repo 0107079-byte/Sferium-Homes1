@@ -74,7 +74,7 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
   const extractedId = propVideoId || extractVideoId(videoUrl)?.id || '';
 
   // Send postMessage commands to iframe players (VK, YouTube, Rutube, Dzen)
-  const sendIframeCommand = useCallback((action: 'play' | 'pause' | 'seek', time?: number) => {
+  const sendIframeCommand = useCallback((action: 'play' | 'pause' | 'seek' | 'rate', timeOrRate?: number) => {
     const iframe = iframeRef.current;
     if (!iframe || !iframe.contentWindow) return;
     const win = iframe.contentWindow;
@@ -89,12 +89,12 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
           win.postMessage(JSON.stringify({ method: 'pause' }), '*');
           win.postMessage(JSON.stringify({ type: 'action', action: 'pause' }), '*');
           win.postMessage(JSON.stringify({ event: 'pause' }), '*');
-        } else if (action === 'seek' && time !== undefined) {
+        } else if (action === 'seek' && timeOrRate !== undefined) {
           // VK seek logic: pause -> seek -> resume after 150ms if playing
           win.postMessage(JSON.stringify({ method: 'pause' }), '*');
-          win.postMessage(JSON.stringify({ method: 'seek', param: time }), '*');
-          win.postMessage(JSON.stringify({ type: 'action', action: 'seek', time }), '*');
-          win.postMessage(JSON.stringify({ event: 'seek', time }), '*');
+          win.postMessage(JSON.stringify({ method: 'seek', param: timeOrRate }), '*');
+          win.postMessage(JSON.stringify({ type: 'action', action: 'seek', time: timeOrRate }), '*');
+          win.postMessage(JSON.stringify({ event: 'seek', time: timeOrRate }), '*');
           if (playingRef.current) {
             setTimeout(() => {
               win.postMessage(JSON.stringify({ method: 'play' }), '*');
@@ -106,31 +106,37 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
           win.postMessage(JSON.stringify({ event: 'command', func: 'playVideo', args: [] }), '*');
         } else if (action === 'pause') {
           win.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }), '*');
-        } else if (action === 'seek' && time !== undefined) {
-          win.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [time, true] }), '*');
+        } else if (action === 'seek' && timeOrRate !== undefined) {
+          win.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [timeOrRate, true] }), '*');
+        } else if (action === 'rate' && timeOrRate !== undefined) {
+          win.postMessage(JSON.stringify({ event: 'command', func: 'setPlaybackRate', args: [timeOrRate] }), '*');
         }
       } else if (provider === 'rutube') {
         if (action === 'play') {
           win.postMessage(JSON.stringify({ type: 'player:play' }), '*');
         } else if (action === 'pause') {
           win.postMessage(JSON.stringify({ type: 'player:pause' }), '*');
-        } else if (action === 'seek' && time !== undefined) {
-          win.postMessage(JSON.stringify({ type: 'player:setCurrentTime', data: { time } }), '*');
-          win.postMessage(JSON.stringify({ type: 'player:changeTime', data: { time } }), '*');
+        } else if (action === 'seek' && timeOrRate !== undefined) {
+          win.postMessage(JSON.stringify({ type: 'player:setCurrentTime', data: { time: timeOrRate } }), '*');
+          win.postMessage(JSON.stringify({ type: 'player:changeTime', data: { time: timeOrRate } }), '*');
+        } else if (action === 'rate' && timeOrRate !== undefined) {
+          win.postMessage(JSON.stringify({ type: 'player:changePlaybackRate', data: { rate: timeOrRate } }), '*');
         }
       } else if (provider === 'yandex') {
         if (action === 'play') {
           win.postMessage(JSON.stringify({ command: 'play' }), '*');
         } else if (action === 'pause') {
           win.postMessage(JSON.stringify({ command: 'pause' }), '*');
-        } else if (action === 'seek' && time !== undefined) {
-          win.postMessage(JSON.stringify({ command: 'seek', time }), '*');
+        } else if (action === 'seek' && timeOrRate !== undefined) {
+          win.postMessage(JSON.stringify({ command: 'seek', time: timeOrRate }), '*');
         }
       }
     } catch (e) {
       console.warn('[UniversalPlayer] sendIframeCommand error:', e);
     }
   }, [provider]);
+
+  const playbackRateRef = useRef<number>(1.0);
 
   // Imperative player adapter handle for strict master remote control
   const playerAdapter: UniversalPlayerRef = {
@@ -175,7 +181,24 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
         return videoRef.current.duration;
       }
       return durationRef.current;
-    }
+    },
+    setPlaybackRate: (rate: number) => {
+      playbackRateRef.current = rate;
+      if (videoRef.current && rate > 0) {
+        videoRef.current.playbackRate = rate;
+      }
+      sendIframeCommand('rate', rate);
+    },
+    getPlaybackRate: () => {
+      if (videoRef.current) {
+        return videoRef.current.playbackRate || 1.0;
+      }
+      return playbackRateRef.current;
+    },
+    isPlaying: () => {
+      if (videoRef.current) return !videoRef.current.paused;
+      return playingRef.current;
+    },
   };
 
   useImperativeHandle(ref, () => playerAdapter, [isPlayerReady, internalTime, sendIframeCommand, provider]);
@@ -210,12 +233,20 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
       seekTo: (seconds: number) => playerAdapter.seekTo(seconds),
       getCurrentTime: () => playerAdapter.getCurrentTime(),
       getDuration: () => playerAdapter.getDuration(),
-      setPlaybackRate: () => {},
-      getPlaybackRate: () => 1.0,
+      setPlaybackRate: (rate: number) => {
+        playbackRateRef.current = rate;
+        if (videoRef.current) videoRef.current.playbackRate = rate;
+        sendIframeCommand('rate', rate);
+      },
+      getPlaybackRate: () => {
+        if (videoRef.current) return videoRef.current.playbackRate || 1.0;
+        return playbackRateRef.current;
+      },
       isPlaying: () => {
         if (videoRef.current) return !videoRef.current.paused;
         return playingRef.current;
       },
+      isReady: () => playerAdapter.isReady(),
     };
 
     const plugin = new VideoSyncPlugin(unified, ws, isHost, roomId || 'CINEMA');
@@ -226,52 +257,15 @@ export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerPro
       plugin.stop();
       pluginRef.current = null;
     };
-  }, [ws, isHost, roomId, provider]);
+  }, [ws, isHost, roomId, provider, isPlayerReady]);
 
   // Host notification hooks for immediate event broadcast
   useEffect(() => {
-    if (isHost && pluginRef.current) {
-      pluginRef.current.updateHostStatus(true);
+    if (pluginRef.current) {
+      pluginRef.current.updateHostStatus(isHost);
       if (roomId) pluginRef.current.updateRoomId(roomId);
     }
   }, [isHost, roomId]);
-
-  // Handle direct player property changes from props (e.g. Host local actions or initial load)
-  useEffect(() => {
-    if (isHost) return;
-    const video = videoRef.current;
-    
-    // HTML5 Video slave enforcement
-    if (video) {
-      if (Math.abs(video.currentTime - currentTime) > 0.3) {
-        if (provider === 'vk') {
-          video.pause();
-          video.currentTime = currentTime;
-          if (playing) {
-            setTimeout(() => video.play().catch(() => {}), 150);
-          }
-        } else {
-          seekSafe(video, currentTime, playing, provider);
-        }
-      }
-      if (playing && video.paused) {
-        video.play().catch(() => {});
-      } else if (!playing && !video.paused) {
-        video.pause();
-      }
-    }
-
-    // Iframe Player slave enforcement (YouTube, VK, Rutube, Dzen)
-    if (provider !== 'direct') {
-      const diff = Math.abs(internalTime - currentTime);
-      if (diff > 0.3) {
-        setInternalTime(currentTime);
-        lastSyncedTimeRef.current = currentTime;
-        sendIframeCommand('seek', currentTime);
-      }
-      sendIframeCommand(playing ? 'play' : 'pause');
-    }
-  }, [playing, currentTime, provider, isHost, internalTime, sendIframeCommand]);
 
   // 4. Listen for iframe postMessage events (VK, YouTube, Rutube, Dzen) with origin verification
   useEffect(() => {

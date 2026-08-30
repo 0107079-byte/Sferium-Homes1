@@ -1417,6 +1417,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
           break;
         }
 
+        case "SYNC_STATE":
         case "video:sync":
         case "sync:state":
         case "video_sync":
@@ -1426,20 +1427,29 @@ wss.on("connection", async (ws: WebSocket, req) => {
         case "heartbeat_update": {
           const isActualHost = (currentRoom.hostId === conn.userId) || isHost || currentRoom.anyoneCanControl;
           if (!isActualHost) {
+            try {
+              ws.send(JSON.stringify({
+                type: "error",
+                code: 403,
+                message: "Forbidden: Only host can broadcast sync state"
+              }));
+            } catch {}
             break;
           }
 
-          const rawTime = msg.hostTime !== undefined
-            ? msg.hostTime
-            : (msg.currentTime !== undefined
-              ? msg.currentTime
-              : (msg.time !== undefined
-                ? msg.time
-                : (msg.payload?.time !== undefined ? msg.payload.time : undefined)));
+          const rawTime = msg.position !== undefined
+            ? msg.position
+            : (msg.hostTime !== undefined
+              ? msg.hostTime
+              : (msg.currentTime !== undefined
+                ? msg.currentTime
+                : (msg.time !== undefined
+                  ? msg.time
+                  : (msg.payload?.time !== undefined ? msg.payload.time : undefined))));
           const newTime = parseFloat(rawTime);
-          if (!isNaN(newTime)) {
-            currentRoom.currentTime = newTime;
-            currentRoom.hostTime = newTime;
+          if (!isNaN(newTime) && isFinite(newTime)) {
+            currentRoom.currentTime = Math.max(0, Math.min(864000, newTime));
+            currentRoom.hostTime = currentRoom.currentTime;
           }
 
           const rawPlaying = msg.hostPlaying !== undefined
@@ -1460,7 +1470,8 @@ wss.on("connection", async (ws: WebSocket, req) => {
             currentRoom.hostProvider = msg.hostProvider;
           }
 
-          const rate = typeof msg.rate === "number" ? msg.rate : (typeof msg.playbackRate === "number" ? msg.playbackRate : 1.0);
+          const rawRate = typeof msg.playbackRate === "number" ? msg.playbackRate : (typeof msg.rate === "number" ? msg.rate : 1.0);
+          const rate = isFinite(rawRate) && rawRate > 0 ? Math.max(0.25, Math.min(4.0, rawRate)) : 1.0;
           const now = typeof msg.updatedAt === "number" ? msg.updatedAt : Date.now();
           currentRoom.lastUpdated = now;
           currentRoom.lastHeartbeatSyncTime = now;
@@ -1468,7 +1479,22 @@ wss.on("connection", async (ws: WebSocket, req) => {
           const syncRev = currentRoom.revision;
           const syncServerTime = Date.now();
 
-          // 0. Primary video:sync broadcast for sub-second sync plugins
+          // 1. Canonical Authoritative SYNC_STATE broadcast
+          broadcastToRoom(conn.roomId, {
+            type: "SYNC_STATE",
+            roomId: currentRoom.roomId,
+            position: currentRoom.currentTime,
+            time: currentRoom.currentTime,
+            playing: currentRoom.playing,
+            playbackRate: rate,
+            rate: rate,
+            updatedAt: now,
+            serverTime: syncServerTime,
+            revision: syncRev,
+            senderId: conn.userId,
+          });
+
+          // 2. Primary video:sync broadcast for sub-second sync plugins
           broadcastToRoom(conn.roomId, {
             type: "video:sync",
             roomId: currentRoom.roomId,
@@ -1481,7 +1507,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
             senderId: conn.userId,
           });
 
-          // 1. sync:state broadcast with structured payload
+          // 3. sync:state broadcast with structured payload
           broadcastToRoom(conn.roomId, {
             type: "sync:state",
             roomId: currentRoom.roomId,
@@ -1500,7 +1526,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
             senderId: conn.userId,
           });
 
-          // 2. Full video sync broadcast (Host = source of truth)
+          // 4. Full video sync broadcast (Host = source of truth)
           broadcastToRoom(conn.roomId, {
             type: "video_sync",
             roomId: currentRoom.roomId,
@@ -1518,7 +1544,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
             senderId: conn.userId,
           });
 
-          // 2. Broadcast hard heartbeat to all room listeners
+          // 5. Broadcast hard heartbeat to all room listeners
           broadcastToRoom(conn.roomId, {
             type: "player:heartbeat",
             currentTime: currentRoom.currentTime,
@@ -1526,17 +1552,7 @@ wss.on("connection", async (ws: WebSocket, req) => {
             playing: currentRoom.playing,
             isPlaying: currentRoom.isPlaying,
             state: currentRoom.playing ? 'playing' : 'paused',
-            playbackRate: msg.playbackRate || 1,
-            serverTime: syncServerTime,
-            revision: syncRev,
-            senderId: conn.userId,
-          });
-
-          broadcastToRoom(conn.roomId, {
-            type: "heartbeat_sync",
-            currentTime: currentRoom.currentTime,
-            playing: currentRoom.playing,
-            isPlaying: currentRoom.isPlaying,
+            playbackRate: rate,
             serverTime: syncServerTime,
             revision: syncRev,
             senderId: conn.userId,
@@ -1544,31 +1560,94 @@ wss.on("connection", async (ws: WebSocket, req) => {
           break;
         }
 
+        case "SYNC_REQUEST":
+        case "request_sync": {
+          const syncServerTime = Date.now();
+          ws.send(JSON.stringify({
+            type: "SYNC_STATE",
+            roomId: currentRoom.roomId,
+            position: currentRoom.currentTime || 0,
+            time: currentRoom.currentTime || 0,
+            playing: Boolean(currentRoom.playing || currentRoom.isPlaying),
+            playbackRate: 1.0,
+            rate: 1.0,
+            updatedAt: currentRoom.lastUpdated || syncServerTime,
+            serverTime: syncServerTime,
+            revision: currentRoom.revision || 1,
+          }));
+          break;
+        }
+
+        case "SYNC_COMMAND":
         case "video_command":
         case "cmd": {
-          if (!canControl) return;
+          if (!canControl) {
+            try {
+              ws.send(JSON.stringify({
+                type: "error",
+                code: 403,
+                message: "Forbidden: You are not authorized to control playback"
+              }));
+            } catch {}
+            return;
+          }
+
           const cmd = msg.cmd || msg;
-          if (cmd.type === "play") {
+          const commandName = cmd.command || cmd.type;
+          const rawCmdTime = cmd.position !== undefined ? cmd.position : (cmd.time !== undefined ? cmd.time : cmd.currentTime);
+          const parsedCmdTime = parseFloat(rawCmdTime);
+          if (!isNaN(parsedCmdTime) && isFinite(parsedCmdTime)) {
+            currentRoom.currentTime = Math.max(0, Math.min(864000, parsedCmdTime));
+            currentRoom.hostTime = currentRoom.currentTime;
+          }
+
+          if (commandName === "play") {
             currentRoom.playing = true;
             currentRoom.isPlaying = true;
             currentRoom.hostPlaying = true;
-            if (cmd.time !== undefined) {
-              currentRoom.currentTime = parseFloat(cmd.time);
-              currentRoom.hostTime = currentRoom.currentTime;
-            }
-          } else if (cmd.type === "pause") {
+          } else if (commandName === "pause") {
             currentRoom.playing = false;
             currentRoom.isPlaying = false;
             currentRoom.hostPlaying = false;
-            if (cmd.time !== undefined) {
-              currentRoom.currentTime = parseFloat(cmd.time);
-              currentRoom.hostTime = currentRoom.currentTime;
-            }
-          } else if (cmd.type === "seek" && cmd.time !== undefined) {
-            currentRoom.currentTime = parseFloat(cmd.time);
-            currentRoom.hostTime = currentRoom.currentTime;
           }
-          currentRoom.lastUpdated = Date.now();
+
+          const rawRate = typeof cmd.playbackRate === "number" ? cmd.playbackRate : (typeof cmd.rate === "number" ? cmd.rate : 1.0);
+          const rate = isFinite(rawRate) && rawRate > 0 ? Math.max(0.25, Math.min(4.0, rawRate)) : 1.0;
+
+          currentRoom.revision = (currentRoom.revision || 0) + 1;
+          const cmdRev = currentRoom.revision;
+          const cmdServerTime = Date.now();
+          currentRoom.lastUpdated = cmdServerTime;
+
+          // Broadcast canonical command & state
+          broadcastToRoom(conn.roomId, {
+            type: "SYNC_COMMAND",
+            command: commandName,
+            roomId: currentRoom.roomId,
+            position: currentRoom.currentTime,
+            time: currentRoom.currentTime,
+            playing: currentRoom.playing,
+            playbackRate: rate,
+            rate: rate,
+            updatedAt: cmdServerTime,
+            serverTime: cmdServerTime,
+            revision: cmdRev,
+            senderId: conn.userId,
+          });
+
+          broadcastToRoom(conn.roomId, {
+            type: "SYNC_STATE",
+            roomId: currentRoom.roomId,
+            position: currentRoom.currentTime,
+            time: currentRoom.currentTime,
+            playing: currentRoom.playing,
+            playbackRate: rate,
+            rate: rate,
+            updatedAt: cmdServerTime,
+            serverTime: cmdServerTime,
+            revision: cmdRev,
+            senderId: conn.userId,
+          });
 
           broadcastToRoom(conn.roomId, {
             type: "video_sync",
@@ -1578,12 +1657,14 @@ wss.on("connection", async (ws: WebSocket, req) => {
             hostProvider: currentRoom.provider || "youtube",
             currentTime: currentRoom.currentTime,
             playing: currentRoom.playing,
+            serverTime: cmdServerTime,
+            revision: cmdRev,
             senderId: conn.userId,
           });
 
           broadcastToRoom(conn.roomId, {
             type: "room_state",
-            state: currentRoom,
+            state: { ...currentRoom, serverTime: cmdServerTime },
           });
 
           saveRoomToDb(currentRoom);

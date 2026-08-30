@@ -88,7 +88,12 @@ export const RutubePlayer = forwardRef<RutubePlayerRef, RutubePlayerProps>(({
     },
     getCurrentTime: () => localTime,
     getDuration: () => durationRef.current,
-  }), [localTime, isReadyState]);
+    setPlaybackRate: (rate: number) => {
+      sendRutubeCommand('player:changePlaybackRate', { rate });
+    },
+    getPlaybackRate: () => 1.0,
+    isPlaying: () => Boolean(isPlaying),
+  }), [localTime, isReadyState, isPlaying]);
 
   // Handle messages from Rutube Iframe
   useEffect(() => {

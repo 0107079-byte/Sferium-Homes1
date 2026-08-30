@@ -179,21 +179,8 @@ export function useVideoSync({
     (currTime: number, isPlay: boolean) => {
       if (!isHost && !canControl) return;
       clientRef.current?.hostBroadcast(currTime, isPlay);
-      syncSocket.sendVideoSync({
-        hostTime: currTime,
-        hostPlaying: isPlay,
-        hostProvider: provider,
-        roomId,
-      });
-      syncSocket.send('sync:state', {
-        roomId,
-        time: currTime,
-        currentTime: currTime,
-        isPlaying: isPlay,
-        playing: isPlay,
-      });
     },
-    [isHost, canControl, provider, roomId]
+    [isHost, canControl]
   );
 
   const sendSeekCommand = useCallback(
@@ -201,45 +188,32 @@ export function useVideoSync({
       if (!canControl) return;
       clientRef.current?.sendSeek(time);
       autoSyncEngine.markManualSync(time);
-      syncSocket.sendSyncCommand({ type: 'seek', time });
-      syncSocket.send('sync:seek', { roomId, time, currentTime: time });
     },
-    [canControl, roomId]
+    [canControl]
   );
 
   const sendPlayCommand = useCallback(
     (time?: number) => {
       if (!canControl) return;
-      clientRef.current?.sendPlay();
-      syncSocket.sendSyncCommand({ type: 'play' });
-      syncSocket.send('sync:play', { roomId, currentTime: time });
+      clientRef.current?.sendPlay(time);
     },
-    [canControl, roomId]
+    [canControl]
   );
 
   const sendPauseCommand = useCallback(
     (time?: number) => {
       if (!canControl) return;
-      clientRef.current?.sendPause();
-      syncSocket.sendSyncCommand({ type: 'pause' });
-      syncSocket.send('sync:pause', { roomId, currentTime: time });
+      clientRef.current?.sendPause(time);
     },
-    [canControl, roomId]
+    [canControl]
   );
 
   const sendStateCommand = useCallback(
     (time: number, isPlaying: boolean) => {
       if (!canControl) return;
       clientRef.current?.hostBroadcast(time, isPlaying);
-      syncSocket.send('sync:state', {
-        roomId,
-        time,
-        currentTime: time,
-        isPlaying,
-        playing: isPlaying,
-      });
     },
-    [canControl, roomId]
+    [canControl]
   );
 
   const setVideoStateFromServer = useCallback((payload: any, player: any) => {

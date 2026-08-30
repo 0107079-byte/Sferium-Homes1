@@ -73,7 +73,7 @@ export class SyncVideoClient {
     this.lastUpdate = Date.now();
   }
 
-  // Хост отправляет состояние каждые 500 мс
+  // Host periodic heartbeat state broadcast
   public hostBroadcast(currentTime: number, isPlaying: boolean, rate: number = 1.0) {
     if (!this.isHost) return;
 
@@ -83,32 +83,22 @@ export class SyncVideoClient {
     this.lastUpdate = now;
 
     this.send({
-      type: "video:sync",
+      type: "SYNC_STATE",
       roomId: this.roomId,
-      time: currentTime,
-      playing: isPlaying,
-      rate,
-      updatedAt: now,
-    });
-
-    this.send({
-      type: "sync:state",
-      roomId: this.roomId,
+      position: currentTime,
       time: currentTime,
       currentTime,
-      isPlaying,
       playing: isPlaying,
+      isPlaying,
+      playbackRate: rate,
       rate,
-      payload: {
-        time: currentTime,
-        playing: isPlaying,
-        rate,
-        ts: now,
-      },
+      serverTime: now,
+      updatedAt: now,
+      senderId: this.userId,
     });
   }
 
-  // Гость получает состояние от хоста
+  // Guest receives state from host
   public applyHostState(player: any, payload: { time: number; playing: boolean; ts?: number; rate?: number }) {
     if (!player) return;
     const hostTime = typeof payload.time === 'number' ? payload.time : 0;
@@ -123,58 +113,50 @@ export class SyncVideoClient {
     applySync(unified, localTime, hostTime, localPlaying, hostPlaying, localRate, hostRate, payload.ts);
   }
 
-  // Хост → play
+  // Host → play
   public sendPlay(time?: number) {
     if (!this.isHost) return;
     const now = Date.now();
     this.send({
-      type: "video:play",
+      type: "SYNC_COMMAND",
+      command: "play",
       roomId: this.roomId,
+      position: time,
       time,
       playing: true,
       updatedAt: now,
-    });
-    this.send({
-      type: "sync:play",
-      roomId: this.roomId,
-      time,
+      senderId: this.userId,
     });
   }
 
-  // Хост → pause
+  // Host → pause
   public sendPause(time?: number) {
     if (!this.isHost) return;
     const now = Date.now();
     this.send({
-      type: "video:pause",
+      type: "SYNC_COMMAND",
+      command: "pause",
       roomId: this.roomId,
+      position: time,
       time,
       playing: false,
       updatedAt: now,
-    });
-    this.send({
-      type: "sync:pause",
-      roomId: this.roomId,
-      time,
+      senderId: this.userId,
     });
   }
 
-  // Хост → seek
+  // Host → seek
   public sendSeek(time: number) {
     if (!this.isHost) return;
     const now = Date.now();
     this.send({
-      type: "video:seek",
+      type: "SYNC_COMMAND",
+      command: "seek",
       roomId: this.roomId,
+      position: time,
       time,
       updatedAt: now,
-    });
-    this.send({
-      type: "sync:seek",
-      roomId: this.roomId,
-      time,
-      currentTime: time,
-      payload: { time },
+      senderId: this.userId,
     });
   }
 }

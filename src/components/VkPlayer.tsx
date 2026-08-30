@@ -101,6 +101,12 @@ export const VkPlayer = forwardRef<VkPlayerRef, VkPlayerProps>(({
     },
     getCurrentTime: () => localTime,
     getDuration: () => durationRef.current,
+    setPlaybackRate: (rate: number) => {
+      sendVkCommand('playbackRate', rate);
+      sendVkCommand('setPlaybackRate', rate);
+    },
+    getPlaybackRate: () => 1.0,
+    isPlaying: () => Boolean(isPlaying),
   }), [localTime, isReadyState, isPlaying]);
 
   // Handle messages from VK Iframe
