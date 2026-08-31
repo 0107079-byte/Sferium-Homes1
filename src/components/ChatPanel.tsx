@@ -1,208 +1,92 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { MessageSquare, Send, Sparkles } from 'lucide-react';
-import { ChatMessage } from '../types';
-import ChatInput from './ChatInput';
+import React, { useState, useRef, useEffect } from 'react';
+import { ChatMessage, User } from '../types';
+import { Send, MessageSquare } from 'lucide-react';
 
-export interface ChatPanelProps {
-  chatHistory: ChatMessage[];
-  currentUserId: string;
+interface ChatPanelProps {
+  messages: ChatMessage[];
+  currentUser: User;
   onSendMessage: (text: string) => void;
-  onSendReaction: (messageId: string, emoji: string) => void;
-  className?: string;
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
-  chatHistory = [],
-  currentUserId,
+  messages,
+  currentUser,
   onSendMessage,
-  onSendReaction,
-  className = '',
 }) => {
-  const [inputText, setInputText] = useState('');
-  const [showScrollButton, setShowScrollButton] = useState(false);
+  const [text, setText] = useState('');
+  const endRef = useRef<HTMLDivElement>(null);
 
-  const chatContainerRef = useRef<HTMLDivElement>(null);
-
-  // Auto-scroll inside chat container without scrolling the main page/window
   useEffect(() => {
-    if (!showScrollButton && chatContainerRef.current) {
-      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
-    }
-  }, [chatHistory, showScrollButton]);
-
-  const handleChatScroll = () => {
-    if (!chatContainerRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
-    const isNearBottom = scrollHeight - scrollTop - clientHeight < 80;
-    setShowScrollButton(!isNearBottom);
-  };
-
-  const handleScrollToBottom = () => {
-    if (chatContainerRef.current) {
-      chatContainerRef.current.scrollTo({
-        top: chatContainerRef.current.scrollHeight,
-        behavior: 'smooth',
-      });
-    }
-    setShowScrollButton(false);
-  };
+    endRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const clean = inputText.trim();
-    if (!clean) return;
-    onSendMessage(clean);
-    setInputText('');
+    if (!text.trim()) return;
+    onSendMessage(text.trim());
+    setText('');
   };
 
   return (
-    <div
-      className={`bg-zinc-950/80 border border-zinc-800 rounded-2xl flex flex-col h-[420px] overflow-hidden relative shadow-lg shadow-black/40 backdrop-blur-md ${className}`}
-    >
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-zinc-800/80 bg-zinc-900/90 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="p-1.5 bg-zinc-800 rounded-lg text-zinc-200">
-            <MessageSquare className="w-4 h-4" />
-          </div>
-          <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-            Чат Совместного Просмотра
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] bg-zinc-800 text-zinc-400 border border-zinc-700 px-2 py-0.5 rounded-full font-bold font-mono">
-            {chatHistory.length} сообщ.
-          </span>
-          <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded-full font-bold font-mono">
-            LIVE
-          </span>
-        </div>
+    <div className="bg-slate-900 border border-slate-800 rounded-xl flex flex-col h-full overflow-hidden">
+      <div className="p-3 border-b border-slate-800 flex items-center gap-2">
+        <MessageSquare className="w-4 h-4 text-purple-400" />
+        <h3 className="text-sm font-semibold text-slate-200">Чат комнаты</h3>
       </div>
 
-      {/* Messages List */}
-      <div
-        ref={chatContainerRef}
-        onScroll={handleChatScroll}
-        className="flex-1 p-4 overflow-y-auto space-y-3.5 bg-gradient-to-b from-zinc-950/60 to-zinc-950/90 custom-scrollbar"
-      >
-        {chatHistory.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center p-6 text-zinc-500 space-y-2">
-            <MessageSquare className="w-8 h-8 opacity-30 text-purple-400" />
-            <p className="text-xs font-semibold text-zinc-400">В чате пока тихо</p>
-            <p className="text-[11px] text-zinc-600 max-w-xs">
-              Напишите первое сообщение или нажмите 🎤 для голосового ввода!
-            </p>
+      <div className="flex-1 p-3 overflow-y-auto flex flex-col gap-2.5 min-h-[180px] max-h-[300px]">
+        {messages.length === 0 ? (
+          <div className="text-center text-xs text-slate-500 my-auto">
+            Начните общение в чате...
           </div>
         ) : (
-          chatHistory.map((msg: ChatMessage) => {
-            if (msg.type === 'system') {
-              return (
-                <div
-                  key={msg.id}
-                  className="text-center text-[11px] text-white font-bold select-none bg-indigo-950/60 py-1.5 px-3 rounded-xl border border-indigo-500/40 max-w-xs mx-auto animate-fade-in shadow-sm"
-                >
-                  {msg.text}
-                </div>
-              );
-            }
-
-            const isMe = msg.userId === currentUserId;
+          messages.map((msg) => {
+            const isMe = msg.userId === currentUser.id;
             return (
               <div
                 key={msg.id}
-                className={`flex flex-col space-y-1 ${
-                  isMe ? 'items-end' : 'items-start'
-                } animate-fade-in`}
+                className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
               >
-                <div className="flex items-center gap-1.5 text-[11px] text-white font-bold">
-                  <span className="text-sm">{msg.avatar || '👤'}</span>
-                  <span className="text-white font-extrabold">{msg.name || 'Аноним'}</span>
-                  <span className="text-purple-300">•</span>
-                  <span className="text-zinc-300 font-mono text-[10px]">
-                    {new Date(msg.timestamp).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
+                {!isMe && (
+                  <span className="text-[10px] font-semibold text-slate-400 mb-0.5" style={{ color: msg.userColor }}>
+                    {msg.userName}
                   </span>
-                </div>
-
+                )}
                 <div
-                  className={`relative group px-4 py-2.5 rounded-2xl text-xs max-w-[85%] font-bold break-words border shadow-md ${
+                  className={`px-3 py-1.5 rounded-xl text-xs max-w-[85%] break-words ${
                     isMe
-                      ? 'bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 text-white border-purple-300/40 rounded-tr-none shadow-purple-900/40'
-                      : 'bg-zinc-900/95 text-white border-indigo-500/40 rounded-tl-none shadow-black/50'
+                      ? 'bg-purple-600 text-white rounded-br-none'
+                      : 'bg-slate-800 text-slate-200 rounded-bl-none border border-slate-700/60'
                   }`}
                 >
-                  <p className="text-white leading-relaxed">{msg.text}</p>
-
-                  {/* Reaction chips */}
-                  {msg.reactions && Object.keys(msg.reactions).length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2 pt-1.5 border-t border-white/20">
-                      {Object.entries(msg.reactions).map(([emoji, uids]) => {
-                        const hasIReacted = uids.includes(currentUserId);
-                        return (
-                          <button
-                            type="button"
-                            key={emoji}
-                            onClick={() => onSendReaction(msg.id, emoji)}
-                            className={`px-2 py-0.5 rounded-lg text-[10px] flex items-center gap-1 cursor-pointer select-none transition-all ${
-                              hasIReacted
-                                ? 'bg-pink-500 text-white border border-pink-300/50 shadow-sm'
-                                : 'bg-zinc-950/80 text-white border border-zinc-700 hover:border-purple-400'
-                            }`}
-                          >
-                            <span>{emoji}</span>
-                            <span className="font-black text-white">{uids.length}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Quick Reaction Hover Menu */}
-                  <div
-                    className={`absolute bottom-full mb-1 ${
-                      isMe ? 'right-0' : 'left-0'
-                    } hidden group-hover:flex items-center gap-1 p-1 bg-zinc-900 border border-purple-500/40 rounded-xl shadow-2xl z-20`}
-                  >
-                    {['❤️', '🔥', '😂', '👍', '😮', '🍿'].map((em) => (
-                      <button
-                        type="button"
-                        key={em}
-                        onClick={() => onSendReaction(msg.id, em)}
-                        className="p-1 hover:bg-zinc-800 rounded-lg text-xs cursor-pointer transition-transform hover:scale-125"
-                      >
-                        {em}
-                      </button>
-                    ))}
-                  </div>
+                  {msg.text}
                 </div>
+                <span className="text-[9px] text-slate-500 mt-0.5">
+                  {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
               </div>
             );
           })
         )}
+        <div ref={endRef} />
       </div>
 
-      {/* Floating "Scroll down for new messages" button */}
-      {showScrollButton && (
+      <form onSubmit={handleSubmit} className="p-2 border-t border-slate-800 flex gap-1.5 bg-slate-950/40">
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Написать сообщение..."
+          className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-purple-500 transition"
+        />
         <button
-          type="button"
-          onClick={handleScrollToBottom}
-          className="absolute bottom-18 left-1/2 -translate-x-1/2 bg-gradient-to-r from-indigo-600 to-pink-600 hover:brightness-110 border border-pink-400/50 text-white px-4 py-2 rounded-xl text-xs font-black shadow-xl shadow-purple-600/30 transition-all cursor-pointer z-20 animate-fade-in flex items-center gap-1.5"
+          type="submit"
+          disabled={!text.trim()}
+          className="p-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white rounded-lg transition"
         >
-          <span>Новые сообщения ↓</span>
+          <Send className="w-3.5 h-3.5" />
         </button>
-      )}
-
-      {/* Input component with Voice Mic */}
-      <ChatInput
-        value={inputText}
-        onChange={setInputText}
-        onSubmit={handleSubmit}
-        placeholder="Напишите сообщение или нажмите 🎤..."
-      />
+      </form>
     </div>
   );
 };
-
-export default ChatPanel;

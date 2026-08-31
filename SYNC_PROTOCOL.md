@@ -1,66 +1,90 @@
-# ПРОТОКОЛ СИНХРОНИЗАЦИИ ВИДЕО (SYNC PROTOCOL)
+# Sferium Homes Video Synchronization Protocol
 
-## 1. Канонические типы сообщений
+Canonical Video Synchronization Protocol Specification for Sferium Homes.
 
-Протокол взаимодействия клиент-сервер использует типизированные JSON-сообщения.
+## 1. Unified Message Protocol
 
-### 1.1 `SYNC_STATE` (Authoritative State Broadcast & Heartbeat)
-Отправляется хостом на сервер (каждые 500 мс или при смене состояния) и рассылается сервером всем гостям.
+The video synchronization system uses strictly three canonical WebSocket messages:
 
-```json
-{
-  "type": "SYNC_STATE",
-  "roomId": "ROOM123",
-  "revision": 105,
-  "position": 42.5,
-  "playing": true,
-  "playbackRate": 1.0,
-  "updatedAt": 1787999900000,
-  "serverTime": 1787999900050,
-  "senderId": "user_host_1"
-}
+```text
+SYNC_COMMAND
+SYNC_STATE
+SYNC_REQUEST
 ```
 
-### 1.2 `SYNC_COMMAND` (Host Direct Command)
-Отправляется хостом при интерактивных действиях (нажатие Play, Pause, перемещение ползунка Seek, изменение скорости).
-
-```json
-{
-  "type": "SYNC_COMMAND",
-  "command": "play" | "pause" | "seek" | "rate",
-  "roomId": "ROOM123",
-  "position": 120.0,
-  "playing": true,
-  "playbackRate": 1.0,
-  "revision": 106,
-  "updatedAt": 1787999901000
-}
-```
-
-### 1.3 `SYNC_REQUEST` (Guest Reconnect / Initial Load State Query)
-Отправляется гостем при входе в комнату или после reconnect.
-
-```json
-{
-  "type": "SYNC_REQUEST",
-  "roomId": "ROOM123",
-  "userId": "user_guest_2"
-}
-```
-
-### 1.4 `SYNC_ACK` / `SYNC_ERROR`
-Служебные ответы сервера (например, если неавторизованный гость пытается послать команду управления).
-
-```json
-{
-  "type": "SYNC_ERROR",
-  "code": "PERMISSION_DENIED",
-  "message": "Only host or permitted users can control playback."
-}
-```
+No other video synchronization messages, legacy aliases, or secondary channels exist.
 
 ---
 
-## 2. Обратная совместимость (Thin Backward-Compatibility Layer)
+## 2. SYNC_COMMAND
 
-Для поддержки существующих клиентов и тестов сервер и клиент прозрачно транслируют старые события (`video:sync`, `sync:state`, `video:play`, `video:pause`, `video:seek`, `video_sync`) в канонические `SYNC_STATE` и `SYNC_COMMAND` без дублирования бизнес-логики.
+Sent by a permitted client (Host, Moderator, or authorized Member) to request playback modification on the authoritative server.
+
+### Schema
+```ts
+interface SyncCommandMessage {
+  type: 'SYNC_COMMAND';
+  roomId: string;
+  command: 'play' | 'pause' | 'seek' | 'rate';
+  position?: number;
+  playbackRate?: number;
+  clientTime?: number;
+  userId?: string;
+}
+```
+
+### Flow
+```text
+PLAYER
+  ↓
+SyncController
+  ↓
+SYNC_COMMAND
+  ↓
+SERVER (Authoritative Sync Server)
+```
+
+Only the server decides whether to apply the command, update room authoritative state, increment monotonic revision, and broadcast `SYNC_STATE`.
+
+---
+
+## 3. SYNC_STATE
+
+The single authoritative state broadcast by the server to all connected clients in the room.
+
+### Schema
+```ts
+interface SyncStateMessage {
+  type: 'SYNC_STATE';
+  roomId: string;
+  position: number;
+  playing: boolean;
+  playbackRate: number;
+  revision: number;
+  serverTime: number;
+}
+```
+
+### Critical Rules
+- `SYNC_STATE` is NEVER a control command. Clients cannot send `SYNC_STATE` to modify server state.
+- Server is the single source of truth.
+- Monotonic revision: `revision++` on each valid server state change.
+- Clients ignore incoming states where `revision <= lastAppliedRevision`.
+
+---
+
+## 4. SYNC_REQUEST
+
+Sent by a client upon joining or resynchronizing to request current room playback state without modifying playback state.
+
+### Schema
+```ts
+interface SyncRequestMessage {
+  type: 'SYNC_REQUEST';
+  roomId: string;
+  userId?: string;
+}
+```
+
+### Response
+The server computes instantaneous room position using the server clock and replies directly to the client with `SYNC_STATE`. `SYNC_REQUEST` does not change room state and does not increment revision.

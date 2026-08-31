@@ -1,105 +1,57 @@
-import { PlayerAdapter } from '../plugins/videoSync';
+import { BaseVideoAdapter, VideoPlayerEvents } from '../lib/VideoAdapter';
 
-export class MockPlayer implements PlayerAdapter {
-  public currentTime: number = 0;
-  public playing: boolean = false;
-  public playbackRate: number = 1.0;
-  public ready: boolean = true;
-  public duration: number = 7200; // 2 hours
-  public provider: string = 'mock';
+export class MockPlayerAdapter extends BaseVideoAdapter {
+  public currentTime = 0;
+  public duration = 300;
+  public playing = false;
+  public playbackRate = 1.0;
 
-  public seekHistory: number[] = [];
-  public playHistory: number[] = [];
-  public pauseHistory: number[] = [];
-  public rateHistory: number[] = [];
+  public playCount = 0;
+  public pauseCount = 0;
+  public seekCount = 0;
+  public rateCount = 0;
 
-  constructor(initialTime = 0, initialPlaying = false) {
-    this.currentTime = initialTime;
-    this.playing = initialPlaying;
+  play(): void {
+    this.playing = true;
+    this.playCount += 1;
+    this.events.onPlay?.();
+  }
+
+  pause(): void {
+    this.playing = false;
+    this.pauseCount += 1;
+    this.events.onPause?.();
+  }
+
+  seekTo(seconds: number): void {
+    this.currentTime = seconds;
+    this.seekCount += 1;
+    this.events.onSeek?.(seconds);
+  }
+
+  setPlaybackRate(rate: number): void {
+    this.playbackRate = rate;
+    this.rateCount += 1;
+    this.events.onRateChange?.(rate);
   }
 
   getCurrentTime(): number {
     return this.currentTime;
   }
 
-  seekTo(seconds: number): void {
-    this.currentTime = seconds;
-    this.seekHistory.push(seconds);
-  }
-
-  play(): void {
-    this.playing = true;
-    this.playHistory.push(this.currentTime);
-  }
-
-  pause(): void {
-    this.playing = false;
-    this.pauseHistory.push(this.currentTime);
-  }
-
-  getPlaybackRate(): number {
-    return this.playbackRate;
-  }
-
-  setPlaybackRate(rate: number): void {
-    this.playbackRate = rate;
-    this.rateHistory.push(rate);
+  getDuration(): number {
+    return this.duration;
   }
 
   isPlaying(): boolean {
     return this.playing;
   }
 
-  isReady(): boolean {
-    return this.ready;
+  getPlaybackRate(): number {
+    return this.playbackRate;
   }
 
-  getDuration(): number {
-    return this.duration;
-  }
-
-  // Simulator helper: advances time by seconds according to playing state and rate
-  tick(seconds: number): void {
-    if (this.playing) {
-      this.currentTime += seconds * this.playbackRate;
-    }
-  }
-
-  resetHistories(): void {
-    this.seekHistory = [];
-    this.playHistory = [];
-    this.pauseHistory = [];
-    this.rateHistory = [];
-  }
-}
-
-export class MockWebSocket {
-  public sentMessages: any[] = [];
-  public listeners: ((event: { data: string }) => void)[] = [];
-
-  send(data: string): void {
-    try {
-      this.sentMessages.push(JSON.parse(data));
-    } catch {
-      this.sentMessages.push(data);
-    }
-  }
-
-  addEventListener(event: string, handler: (event: { data: string }) => void): void {
-    if (event === 'message') {
-      this.listeners.push(handler);
-    }
-  }
-
-  removeEventListener(event: string, handler: (event: { data: string }) => void): void {
-    if (event === 'message') {
-      this.listeners = this.listeners.filter((h) => h !== handler);
-    }
-  }
-
-  // Simulate incoming message to client
-  receive(msg: any): void {
-    const dataStr = typeof msg === 'string' ? msg : JSON.stringify(msg);
-    this.listeners.forEach((h) => h({ data: dataStr }));
+  destroy(): void {
+    this.playing = false;
   }
 }

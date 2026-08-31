@@ -1,90 +1,103 @@
-import type { VideoAdapter } from "./VideoAdapter";
+import { BaseVideoAdapter } from './VideoAdapter';
 
-export function createVKAdapter(element: HTMLVideoElement | HTMLIFrameElement): VideoAdapter {
-  // 1. If it's a direct HTML5 Video element
-  if (element instanceof HTMLVideoElement) {
-    return {
-      async load(url: string) {
-        element.src = url;
-        await element.play().catch(() => {});
-        element.pause();
-      },
-      play() {
-        element.play().catch(() => {});
-      },
-      pause() {
-        element.pause();
-      },
-      seek(time: number) {
-        element.currentTime = time;
-      },
-      getCurrentTime() {
-        return element.currentTime;
-      },
-    };
+export class VKAdapter extends BaseVideoAdapter {
+  private iframe: HTMLIFrameElement | null = null;
+  private duration = 0;
+  private currentTime = 0;
+  private playingState = false;
+  private playbackRate = 1.0;
+  private messageHandler: ((e: MessageEvent) => void) | null = null;
+
+  constructor(iframeElement: HTMLIFrameElement, onReadyCallback?: () => void) {
+    super();
+    this.iframe = iframeElement;
+    this.init(onReadyCallback);
   }
 
-  // 2. If it's an official VK IFrame player with js_api=1 enabled
-  const iframe = element as HTMLIFrameElement;
-  let localCurrentTime = 0;
-
-  const sendVkCommand = (method: string, param?: any) => {
-    if (!iframe || !iframe.contentWindow) return;
-    try {
-      iframe.contentWindow.postMessage(JSON.stringify({ method, param }), '*');
-      iframe.contentWindow.postMessage(JSON.stringify({ type: 'action', action: method, time: param }), '*');
-    } catch (e) {
-      console.warn('[VKAdapter] postMessage error:', e);
-    }
-  };
-
-  // Listen for VK video events (timeupdate, play, pause, seek)
-  if (typeof window !== 'undefined') {
-    const onMessage = (e: MessageEvent) => {
+  private init(onReadyCallback?: () => void): void {
+    this.messageHandler = (event: MessageEvent) => {
       try {
-        let data = e.data;
-        if (typeof data === 'string') {
-          data = JSON.parse(data);
-        }
-        if (!data || typeof data !== 'object') return;
+        const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (!data) return;
 
-        if (data.event === 'timeupdate' && typeof data.time === 'number') {
-          localCurrentTime = data.time;
-        } else if (data.data && typeof data.data.time === 'number') {
-          localCurrentTime = data.data.time;
-        } else if (typeof data.currentTime === 'number') {
-          localCurrentTime = data.currentTime;
+        if (data.type === 'vk_player_time' || data.event === 'timeupdate') {
+          this.currentTime = data.time || data.currentTime || this.currentTime;
+          this.events.onTimeUpdate?.(this.currentTime);
+        } else if (data.type === 'vk_player_play' || data.event === 'play') {
+          this.playingState = true;
+          this.events.onPlay?.();
+        } else if (data.type === 'vk_player_pause' || data.event === 'pause') {
+          this.playingState = false;
+          this.events.onPause?.();
+        } else if (data.type === 'vk_player_ready' || data.event === 'ready') {
+          this.events.onReady?.();
+          onReadyCallback?.();
+        } else if (data.type === 'vk_player_seek' || data.event === 'seek') {
+          this.currentTime = data.time || this.currentTime;
+          this.events.onSeek?.(this.currentTime);
         }
-      } catch {}
+      } catch (e) {
+        // ignore non-VK messages
+      }
     };
-    window.addEventListener('message', onMessage);
+
+    window.addEventListener('message', this.messageHandler);
+    setTimeout(() => {
+      this.events.onReady?.();
+      onReadyCallback?.();
+    }, 1000);
   }
 
-  return {
-    async load(embedUrl: string) {
-      if (iframe && embedUrl) {
-        let finalUrl = embedUrl;
-        if (!finalUrl.includes('js_api=')) {
-          finalUrl += (finalUrl.includes('?') ? '&' : '?') + 'js_api=1';
-        }
-        iframe.src = finalUrl;
-      }
-    },
-    play() {
-      sendVkCommand('play');
-    },
-    pause() {
-      sendVkCommand('pause');
-    },
-    seek(time: number) {
-      localCurrentTime = time;
-      sendVkCommand('pause');
-      sendVkCommand('seek', time);
-      sendVkCommand('play');
-    },
-    getCurrentTime() {
-      return localCurrentTime;
-    },
-  };
-}
+  private postMessage(action: string, value?: any): void {
+    if (!this.iframe || !this.iframe.contentWindow) return;
+    try {
+      this.iframe.contentWindow.postMessage(JSON.stringify({ action, value }), '*');
+    } catch (e) {
+      console.warn('VK postMessage error:', e);
+    }
+  }
 
+  play(): void {
+    this.playingState = true;
+    this.postMessage('play');
+  }
+
+  pause(): void {
+    this.playingState = false;
+    this.postMessage('pause');
+  }
+
+  seekTo(seconds: number): void {
+    this.currentTime = seconds;
+    this.postMessage('seek', seconds);
+  }
+
+  setPlaybackRate(rate: number): void {
+    this.playbackRate = rate;
+    this.postMessage('set_playback_rate', rate);
+  }
+
+  getCurrentTime(): number {
+    return this.currentTime;
+  }
+
+  getDuration(): number {
+    return this.duration;
+  }
+
+  isPlaying(): boolean {
+    return this.playingState;
+  }
+
+  getPlaybackRate(): number {
+    return this.playbackRate;
+  }
+
+  destroy(): void {
+    if (this.messageHandler) {
+      window.removeEventListener('message', this.messageHandler);
+      this.messageHandler = null;
+    }
+    this.iframe = null;
+  }
+}

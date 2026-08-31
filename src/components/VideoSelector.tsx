@@ -1,104 +1,184 @@
 import React, { useState } from 'react';
-import { Play, Link, Youtube, Video, Tv } from 'lucide-react';
-import { VideoProvider } from '../types';
+import { VideoInfo, VideoProvider } from '../types';
+import { Link2, Youtube, PlaySquare, Film, Search } from 'lucide-react';
 
 interface VideoSelectorProps {
-  onSelectVideo: (url: string) => void;
-  currentVideoUrl?: string;
-  detectProvider?: (url: string) => VideoProvider;
+  currentVideo: VideoInfo | null;
+  onSelectVideo: (video: VideoInfo) => void;
+  disabled?: boolean;
 }
 
-export const VideoSelector: React.FC<VideoSelectorProps> = ({
-  onSelectVideo,
-  currentVideoUrl,
-  detectProvider
-}) => {
-  const [inputUrl, setInputUrl] = useState<string>('');
+const PRESET_VIDEOS: VideoInfo[] = [
+  {
+    title: 'Rick Astley - Never Gonna Give You Up',
+    provider: 'youtube',
+    id: 'dQw4w9WgXcQ',
+    url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    thumbnail: 'https://img.youtube.com/vi/dQw4w9WgXcQ/mqdefault.jpg',
+  },
+  {
+    title: 'Lofi Hip Hop Radio - Beats to Relax/Study to',
+    provider: 'youtube',
+    id: 'jfKfPfyJRdk',
+    url: 'https://www.youtube.com/watch?v=jfKfPfyJRdk',
+    thumbnail: 'https://img.youtube.com/vi/jfKfPfyJRdk/mqdefault.jpg',
+  },
+  {
+    title: 'Big Buck Bunny (Open Source Movie 4K)',
+    provider: 'youtube',
+    id: 'aqz-KE-bpKQ',
+    url: 'https://www.youtube.com/watch?v=aqz-KE-bpKQ',
+    thumbnail: 'https://img.youtube.com/vi/aqz-KE-bpKQ/mqdefault.jpg',
+  },
+];
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputUrl.trim()) return;
-    onSelectVideo(inputUrl.trim());
-    setInputUrl('');
+export const VideoSelector: React.FC<VideoSelectorProps> = ({
+  currentVideo,
+  onSelectVideo,
+  disabled,
+}) => {
+  const [urlInput, setUrlInput] = useState('');
+  const [activeTab, setActiveTab] = useState<'presets' | 'url'>('presets');
+
+  const parseVideoUrl = (url: string): VideoInfo | null => {
+    try {
+      const trimmed = url.trim();
+
+      // YouTube
+      const ytMatch = trimmed.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+      if (ytMatch && ytMatch[1]) {
+        return {
+          provider: 'youtube',
+          id: ytMatch[1],
+          url: trimmed,
+          title: `YouTube Video (${ytMatch[1]})`,
+          thumbnail: `https://img.youtube.com/vi/${ytMatch[1]}/mqdefault.jpg`,
+        };
+      }
+
+      // VK Video
+      const vkMatch = trimmed.match(/video_ext\.php\?oid=(-?\d+)&id=(\d+)|vk\.com\/video(-?\d+)_(\d+)/);
+      if (vkMatch) {
+        const oid = vkMatch[1] || vkMatch[3];
+        const vid = vkMatch[2] || vkMatch[4];
+        return {
+          provider: 'vk',
+          id: `${oid}_${vid}`,
+          url: trimmed,
+          title: `VK Video (${oid}_${vid})`,
+        };
+      }
+
+      // Rutube
+      const rutubeMatch = trimmed.match(/rutube\.ru\/(?:video\/|play\/embed\/)([a-zA-Z0-9]+)/);
+      if (rutubeMatch && rutubeMatch[1]) {
+        return {
+          provider: 'rutube',
+          id: rutubeMatch[1],
+          url: trimmed,
+          title: `Rutube Video (${rutubeMatch[1]})`,
+        };
+      }
+
+      // Direct MP4/WebM
+      if (trimmed.match(/\.(mp4|webm|m3u8|ogv)(\?.*)?$/i)) {
+        return {
+          provider: 'direct',
+          id: 'direct-file',
+          url: trimmed,
+          title: 'Прямой видеопоток',
+        };
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
   };
 
-  const sampleVideos = [
-    {
-      title: 'YouTube Demo',
-      url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      icon: <Youtube className="w-3.5 h-3.5 text-red-500" />
-    },
-    {
-      title: 'VK Video',
-      url: 'https://vk.com/video-220000000_456239001',
-      icon: <Video className="w-3.5 h-3.5 text-blue-500" />
-    },
-    {
-      title: 'Rutube Video',
-      url: 'https://rutube.ru/video/e97022d4f29a28e833fbb1bfd5494f6e/',
-      icon: <Tv className="w-3.5 h-3.5 text-indigo-400" />
-    },
-    {
-      title: 'MP4 Эфир',
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-      icon: <Link className="w-3.5 h-3.5 text-emerald-400" />
+  const handleUrlSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!urlInput || disabled) return;
+    const parsed = parseVideoUrl(urlInput);
+    if (parsed) {
+      onSelectVideo(parsed);
+      setUrlInput('');
+    } else {
+      alert('Пожалуйста, укажите корректную ссылку на YouTube, VK, Rutube или прямой .mp4 файл');
     }
-  ];
+  };
 
   return (
-    <div className="bg-gradient-to-b from-zinc-900/90 to-zinc-950/90 border border-zinc-800/80 rounded-2xl p-4 shadow-xl space-y-3 relative overflow-hidden backdrop-blur-md">
-      <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/10 rounded-full blur-2xl pointer-events-none" />
-      
-      <div className="flex items-center space-x-2">
-        <div className="p-2 bg-gradient-to-tr from-indigo-600 to-purple-600 rounded-xl text-white shadow-md shadow-purple-500/20">
-          <Play className="w-4 h-4 fill-current" />
-        </div>
-        <div>
-          <h4 className="text-xs font-black uppercase tracking-wider text-white">
-            Вставьте ссылку на новое видео
-          </h4>
-          <p className="text-[10px] text-white font-bold opacity-90">
-            YouTube, VK Video, Rutube, Yandex или прямое видео (MP4 / HLS)
-          </p>
-        </div>
-      </div>
-
-      <form onSubmit={handleSubmit} className="flex gap-2">
-        <input
-          type="text"
-          value={inputUrl}
-          onChange={(e) => setInputUrl(e.target.value)}
-          placeholder="https://vk.com/video... или https://youtu.be/..."
-          className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-purple-500 transition-all font-mono shadow-inner"
-        />
-        <button
-          type="submit"
-          disabled={!inputUrl.trim()}
-          className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 disabled:from-zinc-900 disabled:to-zinc-900 disabled:text-zinc-600 text-white font-bold text-xs uppercase tracking-wider rounded-xl transition-all shadow-lg shadow-purple-600/20 cursor-pointer"
-        >
-          Запустить
-        </button>
-      </form>
-
-      {/* Preset samples */}
-      <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-zinc-800/60">
-        <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">
-          Быстрые варианты:
-        </span>
-        {sampleVideos.map((sample, idx) => (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+          <Film className="w-4 h-4 text-purple-400" /> Выбор видео
+        </h3>
+        <div className="flex gap-1 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-xs">
           <button
-            key={idx}
-            type="button"
-            onClick={() => onSelectVideo(sample.url)}
-            className="flex items-center space-x-1.5 px-3 py-1 bg-zinc-950 hover:bg-zinc-900 border border-zinc-800 hover:border-indigo-500/50 rounded-xl text-[11px] text-zinc-200 transition-all cursor-pointer shadow-sm hover:shadow-indigo-500/10"
+            onClick={() => setActiveTab('presets')}
+            className={`px-2.5 py-1 rounded-md transition ${activeTab === 'presets' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
           >
-            {sample.icon}
-            <span className="font-semibold">{sample.title}</span>
+            Каталог
           </button>
-        ))}
+          <button
+            onClick={() => setActiveTab('url')}
+            className={`px-2.5 py-1 rounded-md transition ${activeTab === 'url' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+          >
+            Ссылка
+          </button>
+        </div>
       </div>
+
+      {activeTab === 'url' ? (
+        <form onSubmit={handleUrlSubmit} className="flex gap-2">
+          <div className="relative flex-1">
+            <Link2 className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.target.value)}
+              placeholder="Вставьте ссылку на YouTube, VK, Rutube или .mp4"
+              disabled={disabled}
+              className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-purple-500 transition"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={disabled || !urlInput.trim()}
+            className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition"
+          >
+            Открыть
+          </button>
+        </form>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          {PRESET_VIDEOS.map((vid) => (
+            <div
+              key={vid.id}
+              onClick={() => !disabled && onSelectVideo(vid)}
+              className={`p-2.5 rounded-lg border transition cursor-pointer flex flex-col gap-1.5 ${
+                currentVideo?.id === vid.id
+                  ? 'bg-purple-950/40 border-purple-600'
+                  : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+              } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              {vid.thumbnail && (
+                <img
+                  src={vid.thumbnail}
+                  alt={vid.title}
+                  className="w-full aspect-video object-cover rounded-md"
+                />
+              )}
+              <span className="text-xs font-medium text-slate-200 line-clamp-1">{vid.title}</span>
+              <div className="flex items-center gap-1 text-[10px] text-purple-400">
+                <Youtube className="w-3 h-3" />
+                <span>YouTube</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
-
-export default VideoSelector;

@@ -1,487 +1,263 @@
-import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
-import { Play, Maximize } from 'lucide-react';
-import { VideoProvider } from '../types';
-import { extractVideoId } from '../utils/extractVideoId';
-import { VideoSyncPlugin, UnifiedPlayer, PlayerAdapter } from '../plugins/videoSync';
-
-export interface UniversalPlayerRef extends PlayerAdapter {
-  getCurrentTime: () => number;
-  seekTo: (seconds: number, allowSeekAhead?: boolean) => void;
-  play: () => void;
-  pause: () => void;
-  isReady: () => boolean;
-  getDuration: () => number;
-  provider?: string;
-}
+import React, { useEffect, useRef, useState } from 'react';
+import { SyncController } from '../plugins/videoSync';
+import { VideoInfo } from '../types';
+import { YouTubeAdapter } from '../lib/YouTubeAdapter';
+import { VKAdapter } from '../lib/VKAdapter';
+import { RutubeAdapter } from '../lib/RutubeAdapter';
+import { DirectVideoAdapter } from '../lib/DirectVideoAdapter';
+import { Play, Pause, RotateCcw, Volume2, VolumeX, Maximize2, ShieldAlert } from 'lucide-react';
 
 interface UniversalPlayerProps {
-  roomId?: string;
-  userId?: string;
-  videoUrl: string;
-  provider: VideoProvider;
-  videoId?: string;
-  playing: boolean;
-  currentTime: number;
+  video: VideoInfo | null;
+  syncController: SyncController | null;
+  canControl: boolean;
   isHost: boolean;
-  anyoneCanControl?: boolean;
-  ws?: WebSocket | null;
-  onPlay?: () => void;
-  onPause?: () => void;
-  onSeek?: (time: number) => void;
-  onTimeUpdate?: (time: number) => void;
-  onDurationChange?: (duration: number) => void;
-  onStreamRequest?: (streamUrl: string) => void;
 }
 
-export const UniversalPlayer = forwardRef<UniversalPlayerRef, UniversalPlayerProps>(({
-  roomId,
-  videoUrl,
-  provider,
-  videoId: propVideoId,
-  playing,
-  currentTime,
+export const UniversalPlayer: React.FC<UniversalPlayerProps> = ({
+  video,
+  syncController,
+  canControl,
   isHost,
-  ws,
-  onPlay,
-  onPause,
-  onSeek,
-  onTimeUpdate,
-  onDurationChange,
-}, ref) => {
+}) => {
+  const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
 
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [isMuted, setIsMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1.0);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
-  const [internalTime, setInternalTime] = useState<number>(currentTime);
-  const durationRef = useRef<number>(1800);
 
-  const lastSyncedTimeRef = useRef<number>(currentTime);
-  const isHostRef = useRef<boolean>(isHost);
-  const playingRef = useRef<boolean>(playing);
-  const currentTimeRef = useRef<number>(currentTime);
-  const providerRef = useRef<VideoProvider>(provider);
-
+  // Initialize and bind player adapter to the single SyncController
   useEffect(() => {
-    isHostRef.current = isHost;
-    playingRef.current = playing;
-    currentTimeRef.current = currentTime;
-    providerRef.current = provider;
-  }, [isHost, playing, currentTime, provider]);
+    if (!video || !syncController) return;
 
-  const extractedId = propVideoId || extractVideoId(videoUrl)?.id || '';
-
-  // Send postMessage commands to iframe players (VK, YouTube, Rutube, Dzen)
-  const sendIframeCommand = useCallback((action: 'play' | 'pause' | 'seek' | 'rate', timeOrRate?: number) => {
-    const iframe = iframeRef.current;
-    if (!iframe || !iframe.contentWindow) return;
-    const win = iframe.contentWindow;
-
-    try {
-      if (provider === 'vk') {
-        if (action === 'play') {
-          win.postMessage(JSON.stringify({ method: 'play' }), '*');
-          win.postMessage(JSON.stringify({ type: 'action', action: 'play' }), '*');
-          win.postMessage(JSON.stringify({ event: 'play' }), '*');
-        } else if (action === 'pause') {
-          win.postMessage(JSON.stringify({ method: 'pause' }), '*');
-          win.postMessage(JSON.stringify({ type: 'action', action: 'pause' }), '*');
-          win.postMessage(JSON.stringify({ event: 'pause' }), '*');
-        } else if (action === 'seek' && timeOrRate !== undefined) {
-          // VK seek logic: pause -> seek -> resume after 150ms if playing
-          win.postMessage(JSON.stringify({ method: 'pause' }), '*');
-          win.postMessage(JSON.stringify({ method: 'seek', param: timeOrRate }), '*');
-          win.postMessage(JSON.stringify({ type: 'action', action: 'seek', time: timeOrRate }), '*');
-          win.postMessage(JSON.stringify({ event: 'seek', time: timeOrRate }), '*');
-          if (playingRef.current) {
-            setTimeout(() => {
-              win.postMessage(JSON.stringify({ method: 'play' }), '*');
-            }, 150);
-          }
-        }
-      } else if (provider === 'youtube') {
-        if (action === 'play') {
-          win.postMessage(JSON.stringify({ event: 'command', func: 'playVideo', args: [] }), '*');
-        } else if (action === 'pause') {
-          win.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }), '*');
-        } else if (action === 'seek' && timeOrRate !== undefined) {
-          win.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [timeOrRate, true] }), '*');
-        } else if (action === 'rate' && timeOrRate !== undefined) {
-          win.postMessage(JSON.stringify({ event: 'command', func: 'setPlaybackRate', args: [timeOrRate] }), '*');
-        }
-      } else if (provider === 'rutube') {
-        if (action === 'play') {
-          win.postMessage(JSON.stringify({ type: 'player:play' }), '*');
-        } else if (action === 'pause') {
-          win.postMessage(JSON.stringify({ type: 'player:pause' }), '*');
-        } else if (action === 'seek' && timeOrRate !== undefined) {
-          win.postMessage(JSON.stringify({ type: 'player:setCurrentTime', data: { time: timeOrRate } }), '*');
-          win.postMessage(JSON.stringify({ type: 'player:changeTime', data: { time: timeOrRate } }), '*');
-        } else if (action === 'rate' && timeOrRate !== undefined) {
-          win.postMessage(JSON.stringify({ type: 'player:changePlaybackRate', data: { rate: timeOrRate } }), '*');
-        }
-      } else if (provider === 'yandex') {
-        if (action === 'play') {
-          win.postMessage(JSON.stringify({ command: 'play' }), '*');
-        } else if (action === 'pause') {
-          win.postMessage(JSON.stringify({ command: 'pause' }), '*');
-        } else if (action === 'seek' && timeOrRate !== undefined) {
-          win.postMessage(JSON.stringify({ command: 'seek', time: timeOrRate }), '*');
-        }
-      }
-    } catch (e) {
-      console.warn('[UniversalPlayer] sendIframeCommand error:', e);
-    }
-  }, [provider]);
-
-  const playbackRateRef = useRef<number>(1.0);
-
-  // Imperative player adapter handle for strict master remote control
-  const playerAdapter: UniversalPlayerRef = {
-    provider,
-    isReady: () => isPlayerReady || (provider === 'direct' ? Boolean(videoRef.current) : true),
-    getCurrentTime: () => {
-      if (videoRef.current) {
-        return videoRef.current.currentTime || internalTime;
-      }
-      return internalTime;
-    },
-    seekTo: (seconds: number) => {
-      setInternalTime(seconds);
-      lastSyncedTimeRef.current = seconds;
-      if (videoRef.current) {
-        if (provider === 'vk') {
-          videoRef.current.pause();
-          videoRef.current.currentTime = seconds;
-          if (playingRef.current) {
-            setTimeout(() => videoRef.current?.play().catch(() => {}), 150);
-          }
-        } else {
-          videoRef.current.currentTime = seconds;
-        }
-      }
-      sendIframeCommand('seek', seconds);
-    },
-    play: () => {
-      if (videoRef.current) {
-        videoRef.current.play().catch(() => {});
-      }
-      sendIframeCommand('play');
-    },
-    pause: () => {
-      if (videoRef.current) {
-        videoRef.current.pause();
-      }
-      sendIframeCommand('pause');
-    },
-    getDuration: () => {
-      if (videoRef.current && videoRef.current.duration) {
-        return videoRef.current.duration;
-      }
-      return durationRef.current;
-    },
-    setPlaybackRate: (rate: number) => {
-      playbackRateRef.current = rate;
-      if (videoRef.current && rate > 0) {
-        videoRef.current.playbackRate = rate;
-      }
-      sendIframeCommand('rate', rate);
-    },
-    getPlaybackRate: () => {
-      if (videoRef.current) {
-        return videoRef.current.playbackRate || 1.0;
-      }
-      return playbackRateRef.current;
-    },
-    isPlaying: () => {
-      if (videoRef.current) return !videoRef.current.paused;
-      return playingRef.current;
-    },
-  };
-
-  useImperativeHandle(ref, () => playerAdapter, [isPlayerReady, internalTime, sendIframeCommand, provider]);
-
-  // Mark player as ready on URL mount
-  useEffect(() => {
+    let adapter: any = null;
     setIsPlayerReady(false);
-    const timer = setTimeout(() => {
-      setIsPlayerReady(true);
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [videoUrl, provider]);
 
-  // VideoSyncPlugin Lifecycle: Replaces legacy fragmented intervals with unified sub-second sync engine
-  const pluginRef = useRef<VideoSyncPlugin | null>(null);
+    if (video.provider === 'youtube') {
+      const containerId = 'youtube-player-container';
+      if (document.getElementById(containerId)) {
+        adapter = new YouTubeAdapter(containerId, video.id, () => {
+          setIsPlayerReady(true);
+        });
+      }
+    } else if (video.provider === 'vk' && iframeRef.current) {
+      adapter = new VKAdapter(iframeRef.current, () => {
+        setIsPlayerReady(true);
+      });
+    } else if (video.provider === 'rutube' && iframeRef.current) {
+      adapter = new RutubeAdapter(iframeRef.current, () => {
+        setIsPlayerReady(true);
+      });
+    } else if (video.provider === 'direct' && videoRef.current) {
+      adapter = new DirectVideoAdapter(videoRef.current, () => {
+        setIsPlayerReady(true);
+      });
+    }
 
-  useEffect(() => {
-    if (!ws) return;
-
-    const unified: UnifiedPlayer = {
-      play: () => playerAdapter.play(),
-      pause: () => playerAdapter.pause(),
-      seekTo: (seconds: number) => playerAdapter.seekTo(seconds),
-      getCurrentTime: () => playerAdapter.getCurrentTime(),
-      getDuration: () => playerAdapter.getDuration(),
-      setPlaybackRate: (rate: number) => {
-        playbackRateRef.current = rate;
-        if (videoRef.current) videoRef.current.playbackRate = rate;
-        sendIframeCommand('rate', rate);
-      },
-      getPlaybackRate: () => {
-        if (videoRef.current) return videoRef.current.playbackRate || 1.0;
-        return playbackRateRef.current;
-      },
-      isPlaying: () => {
-        if (videoRef.current) return !videoRef.current.paused;
-        return playingRef.current;
-      },
-      isReady: () => playerAdapter.isReady(),
-    };
-
-    const plugin = new VideoSyncPlugin(unified, ws, isHost, roomId || 'CINEMA');
-    pluginRef.current = plugin;
-    plugin.start();
+    if (adapter) {
+      syncController.setAdapter(adapter);
+    }
 
     return () => {
-      plugin.stop();
-      pluginRef.current = null;
-    };
-  }, [ws, isHost, roomId, provider, isPlayerReady]);
-
-  // Host notification hooks for immediate event broadcast
-  useEffect(() => {
-    if (pluginRef.current) {
-      pluginRef.current.updateHostStatus(isHost);
-      if (roomId) pluginRef.current.updateRoomId(roomId);
-    }
-  }, [isHost, roomId]);
-
-  // 4. Listen for iframe postMessage events (VK, YouTube, Rutube, Dzen) with origin verification
-  useEffect(() => {
-    const ALLOWED_ORIGIN_PATTERNS = [
-      /https:\/\/(www\.)?youtube\.com/,
-      /https:\/\/(www\.)?youtube-nocookie\.com/,
-      /https:\/\/(www\.)?vk\.com/,
-      /https:\/\/(www\.)?rutube\.ru/,
-      /https:\/\/(www\.)?dzen\.ru/,
-      /https:\/\/(www\.)?ok\.ru/,
-      /https:\/\/yastatic\.net/,
-    ];
-
-    const isAllowedOrigin = (origin: string) => {
-      if (!origin || origin === 'null' || origin === window.location.origin) return true;
-      return ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(origin));
-    };
-
-    const handleWindowMessage = (event: MessageEvent) => {
-      try {
-        if (event.origin && !isAllowedOrigin(event.origin)) {
-          return;
-        }
-
-        let data = event.data;
-        if (typeof data === 'string') {
-          try {
-            data = JSON.parse(data);
-          } catch (e) {
-            return;
-          }
-        }
-        if (!data || typeof data !== 'object') return;
-
-        let cur: number | undefined = undefined;
-        let dur: number | undefined = undefined;
-
-        // YouTube infoDelivery
-        if (data.info && typeof data.info === 'object') {
-          if (typeof data.info.currentTime === 'number') cur = data.info.currentTime;
-          if (typeof data.info.duration === 'number') dur = data.info.duration;
-        }
-
-        // VK / Rutube data formats
-        if (Array.isArray(data.data)) {
-          if (typeof data.data[0] === 'number') cur = data.data[0];
-          if (typeof data.data[1] === 'number') dur = data.data[1];
-        } else if (data.data && typeof data.data === 'object') {
-          if (typeof data.data.time === 'number') cur = data.data.time;
-          if (typeof data.data.currentTime === 'number') cur = data.data.currentTime;
-          if (typeof data.data.duration === 'number') dur = data.data.duration;
-        }
-
-        // Direct root fields
-        if (typeof data.currentTime === 'number') cur = data.currentTime;
-        if (typeof data.time === 'number') cur = data.time;
-        if (typeof data.duration === 'number') dur = data.duration;
-
-        if (cur !== undefined && !isNaN(cur) && cur >= 0) {
-          setInternalTime(cur);
-          // Only update UI timeline, never override the master remote
-          onTimeUpdate?.(cur);
-        }
-        if (dur !== undefined && !isNaN(dur) && dur > 0) {
-          durationRef.current = dur;
-          onDurationChange?.(dur);
-        }
-      } catch (err) {}
-    };
-
-    window.addEventListener('message', handleWindowMessage);
-    return () => window.removeEventListener('message', handleWindowMessage);
-  }, [onTimeUpdate, onDurationChange]);
-
-  const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      const cur = videoRef.current.currentTime;
-      setInternalTime(cur);
-      if (onTimeUpdate) {
-        onTimeUpdate(cur);
+      if (adapter) {
+        adapter.destroy();
+        syncController.setAdapter(null);
       }
-    }
-  };
+    };
+  }, [video?.url, video?.provider, video?.id, syncController]);
 
-  const handleLoadedMetadata = () => {
-    if (videoRef.current && onDurationChange) {
-      const dur = videoRef.current.duration;
-      if (dur && !isNaN(dur) && dur !== Infinity) {
-        durationRef.current = dur;
-        onDurationChange(dur);
+  // Track progress locally for UI controls
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const state = syncController?.getLastKnownState();
+      if (state) {
+        setIsPlaying(state.playing);
+        setPlaybackRate(state.playbackRate);
+        const now = Date.now();
+        const elapsed = state.playing ? Math.max(0, (now - state.serverTime) / 1000) * state.playbackRate : 0;
+        setCurrentTime(state.position + elapsed);
       }
-    }
-  };
+    }, 500);
+    return () => clearInterval(timer);
+  }, [syncController]);
 
-  const toggleFullScreen = () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().catch(() => {});
+  const handlePlayPause = () => {
+    if (!syncController || (!canControl && !isHost)) return;
+    if (isPlaying) {
+      syncController.handleUserCommand('pause');
     } else {
-      document.exitFullscreen().catch(() => {});
+      syncController.handleUserCommand('play');
     }
   };
 
-  if (!videoUrl) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full min-h-[320px] bg-zinc-950 border border-zinc-850 rounded-3xl text-zinc-500 p-6 text-center space-y-3">
-        <div className="w-16 h-16 bg-zinc-900 border border-zinc-800 rounded-2xl flex items-center justify-center text-zinc-400">
-          <Play className="w-8 h-8 stroke-1" />
-        </div>
-        <div className="space-y-1">
-          <h3 className="text-sm font-bold text-zinc-300 uppercase tracking-wider">Плеер готов к трансляции</h3>
-          <p className="text-xs text-zinc-500 max-w-sm">
-            Откройте панель выше и вставьте ссылку на видео (VK, YouTube, Rutube или MP4 файл). Плеер жёстко привязан к пульту управления.
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!syncController || (!canControl && !isHost)) return;
+    const targetPos = parseFloat(e.target.value);
+    setCurrentTime(targetPos);
+    syncController.handleUserCommand('seek', targetPos);
+  };
+
+  const handleRateChange = (rate: number) => {
+    if (!syncController || (!canControl && !isHost)) return;
+    setPlaybackRate(rate);
+    syncController.handleUserCommand('rate', undefined, rate);
+  };
+
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
+
+  const renderPlayer = () => {
+    if (!video) {
+      return (
+        <div className="w-full h-full flex flex-col items-center justify-center text-slate-400 bg-slate-900 rounded-xl p-8 border border-slate-800">
+          <Play className="w-16 h-16 text-purple-500 mb-4 opacity-70" />
+          <h3 className="text-xl font-medium text-slate-200">Видео не выбрано</h3>
+          <p className="text-sm text-slate-400 mt-1 text-center max-w-sm">
+            Выберите видео из каталога или вставьте ссылку на YouTube, VK или Rutube
           </p>
         </div>
-      </div>
-    );
-  }
-
-  // YouTube Embed
-  if (provider === 'youtube') {
-    const embedUrl = `https://www.youtube.com/embed/${extractedId}?autoplay=${playing ? 1 : 0}&start=${Math.floor(currentTime)}&enablejsapi=1&rel=0`;
-    return (
-      <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl">
-        <iframe
-          ref={iframeRef}
-          src={embedUrl}
-          className="w-full h-full min-h-[320px] border-0"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-          allowFullScreen
-          title="YouTube Video"
-        />
-      </div>
-    );
-  }
-
-  // VK Video Embed
-  if (provider === 'vk') {
-    let vkOid = '';
-    let vkId = '';
-    let vkHash = '';
-
-    if (extractedId.includes('_')) {
-      const parts = extractedId.split('_');
-      vkOid = parts[0];
-      vkId = parts[1];
-      if (parts[2]) vkHash = parts[2];
+      );
     }
 
-    const vkEmbedUrl = `https://vk.com/video_ext.php?oid=${vkOid}&id=${vkId}${vkHash ? `&hash=${vkHash}` : ''}&autoplay=${playing ? 1 : 0}&js_api=1`;
+    if (video.provider === 'youtube') {
+      return (
+        <div className="w-full h-full relative bg-black rounded-xl overflow-hidden">
+          <div id="youtube-player-container" className="w-full h-full" />
+        </div>
+      );
+    }
 
-    return (
-      <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl">
+    if (video.provider === 'vk') {
+      const vkEmbedUrl = video.url.includes('embed') ? video.url : `https://vk.com/video_ext.php?oid=${video.id.split('_')[0]}&id=${video.id.split('_')[1]}&hash=`;
+      return (
         <iframe
           ref={iframeRef}
           src={vkEmbedUrl}
-          className="w-full h-full min-h-[320px] border-0"
+          className="w-full h-full rounded-xl bg-black"
           allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-          referrerPolicy="no-referrer"
           allowFullScreen
-          title="VK Video"
         />
-      </div>
-    );
-  }
+      );
+    }
 
-  // Rutube Video Embed
-  if (provider === 'rutube') {
-    const rutubeUrl = `https://rutube.ru/play/embed/${extractedId}?autoplay=${playing ? 1 : 0}`;
-
-    return (
-      <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl">
+    if (video.provider === 'rutube') {
+      const rutubeUrl = `https://rutube.ru/play/embed/${video.id}`;
+      return (
         <iframe
           ref={iframeRef}
           src={rutubeUrl}
-          className="w-full h-full min-h-[320px] border-0"
-          allow="clipboard-write; autoplay; fullscreen"
+          className="w-full h-full rounded-xl bg-black"
+          allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
           allowFullScreen
-          title="Rutube Video"
         />
-      </div>
-    );
-  }
+      );
+    }
 
-  // Yandex / Dzen Video Embed
-  if (provider === 'yandex') {
-    const dzenUrl = `https://dzen.ru/embed/${extractedId}?from_block=partner&autoplay=${playing ? 1 : 0}`;
-
-    return (
-      <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl">
-        <iframe
-          ref={iframeRef}
-          src={dzenUrl}
-          className="w-full h-full min-h-[320px] border-0"
-          allow="autoplay; encrypted-media; fullscreen"
-          allowFullScreen
-          title="Dzen Video"
+    if (video.provider === 'direct') {
+      return (
+        <video
+          ref={videoRef}
+          src={video.url}
+          className="w-full h-full rounded-xl bg-black"
+          playsInline
         />
-      </div>
-    );
-  }
+      );
+    }
 
-  // HTML5 Direct Video
+    return null;
+  };
+
   return (
-    <div ref={containerRef} className="relative w-full h-full min-h-[320px] bg-black rounded-3xl overflow-hidden border border-zinc-850 shadow-2xl flex items-center justify-center group">
-      <video
-        ref={videoRef}
-        src={videoUrl}
-        className="w-full h-full max-h-[500px] object-contain"
-        onTimeUpdate={handleTimeUpdate}
-        onLoadedMetadata={handleLoadedMetadata}
-        onEnded={() => onPause && onPause()}
-      />
+    <div className="flex flex-col w-full h-full bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 shadow-2xl">
+      {/* Player Canvas */}
+      <div className="relative w-full aspect-video bg-black flex items-center justify-center" ref={containerRef}>
+        {renderPlayer()}
 
-      <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity z-20">
-        <button
-          type="button"
-          onClick={toggleFullScreen}
-          className="p-2 bg-black/60 hover:bg-black/80 text-white rounded-xl backdrop-blur-md transition-all cursor-pointer border border-white/10"
-          title="На весь экран"
-        >
-          <Maximize className="w-4 h-4" />
-        </button>
+        {!canControl && !isHost && (
+          <div className="absolute top-3 right-3 bg-slate-900/80 backdrop-blur px-3 py-1 rounded-full border border-slate-700 text-xs text-slate-300 flex items-center gap-1.5 shadow-lg">
+            <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+            <span>Синхронизация от Хоста</span>
+          </div>
+        )}
+      </div>
+
+      {/* Control Bar */}
+      <div className="bg-slate-900/90 backdrop-blur p-4 border-t border-slate-800 flex flex-col gap-3">
+        {/* Timeline Slider */}
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-mono text-slate-400 min-w-[40px]">{formatTime(currentTime)}</span>
+          <input
+            type="range"
+            min="0"
+            max={duration || 1800}
+            step="0.5"
+            value={currentTime}
+            onChange={handleSeek}
+            disabled={!canControl && !isHost}
+            className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+          <span className="text-xs font-mono text-slate-400 min-w-[40px]">{formatTime(duration || 1800)}</span>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handlePlayPause}
+              disabled={!canControl && !isHost}
+              className="p-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-medium transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 shadow-md shadow-purple-600/20"
+              title={isPlaying ? 'Пауза (SYNC_COMMAND)' : 'Воспроизведение (SYNC_COMMAND)'}
+            >
+              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 fill-white" />}
+              <span className="text-xs pr-1">{isPlaying ? 'Пауза' : 'Играть'}</span>
+            </button>
+
+            <button
+              onClick={() => syncController?.handleUserCommand('seek', 0)}
+              disabled={!canControl && !isHost}
+              className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition active:scale-95 disabled:opacity-40"
+              title="В начало (SYNC_COMMAND)"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+
+            {/* Playback Rate Selector */}
+            <div className="flex items-center bg-slate-800/80 rounded-xl p-1 border border-slate-700/60 ml-2">
+              {[0.75, 1.0, 1.25, 1.5, 2.0].map((rate) => (
+                <button
+                  key={rate}
+                  onClick={() => handleRateChange(rate)}
+                  disabled={!canControl && !isHost}
+                  className={`px-2 py-1 rounded-lg text-xs font-medium transition ${
+                    playbackRate === rate
+                      ? 'bg-purple-600 text-white shadow'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {rate}x
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsMuted(!isMuted)}
+              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition"
+            >
+              {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
-});
-
-UniversalPlayer.displayName = 'UniversalPlayer';
-export default UniversalPlayer;
+};
